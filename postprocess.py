@@ -187,7 +187,12 @@ def postprocess_zip_markdown(zip_path: str, output_dir: Optional[str] = None) ->
                     text = data.decode("utf-8", errors="replace")
 
                     # Pipeline Step 1: Heading hierarchy normalization
-                    cleaned, count = clean_markdown_heading_hierarchy(text)
+                    # 1a: Smooth skipped heading levels (e.g., ## -> #### becomes ## -> ###)
+                    from custom_markdown import normalize_heading_skipped_levels
+                    smoothed = normalize_heading_skipped_levels(text)
+
+                    # 1b: Merge consecutive headings without body text (e.g. ## H1 followed by ## H2 -> ## H1 - H2)
+                    cleaned, count = clean_markdown_heading_hierarchy(smoothed)
                     total_merges += count
 
                     # Pipeline Step 2: Presidio PII detection and enclosure masking

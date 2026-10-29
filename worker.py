@@ -35,8 +35,12 @@ def run_conversion_task(task: dict):
     zip_dest = os.path.join(output_dir, f"{base_stem}_parsed.zip")
     runner_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parse_runner.py")
 
+    # Prefer virtual environment python if it exists in the project root
+    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Scripts", "python.exe")
+    python_exec = venv_python if os.path.exists(venv_python) else sys.executable
+
     cmd = [
-        sys.executable,
+        python_exec,
         runner_script,
         pdf_path,
         tier,
