@@ -57,11 +57,14 @@ def run_conversion_task(task: dict):
         "-v"
     ])
 
-    # Environment configuration for CPU vs GPU and UTF-8 encoding on Windows
+    # Environment configuration for CPU vs GPU, full tracebacks, and UTF-8 encoding
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
     env["PYTHONUTF8"] = "1"
+    env["PYTHONFAULTHANDLER"] = "1"
+    env["MINERU_DEBUG"] = "1"
+    env["MAGIC_PDF_DEBUG"] = "1"
     
     if device == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
