@@ -15,6 +15,23 @@ def main():
     zip_dest = Path(sys.argv[5]).resolve()
 
     try:
+        # Hotfix: MinerU 4.0.12 has a bug on Linux/Python 3.12 where native._owned_span_texts
+        # calls owner.prepare_span_texts(..., private_ranges) and fails with:
+        # TypeError: argument 'private_ranges': 'int' object is not an instance of 'tuple'.
+        # By patching _owned_span_texts to catch TypeError and return None, MinerU automatically
+        # executes its standard Python text span assignment fallback without crashing.
+        try:
+            from mineru.backend.analysis.pdf.text import native as mineru_native
+            orig_owned_span_texts = mineru_native._owned_span_texts
+            def safe_owned_span_texts(*args, **kwargs):
+                try:
+                    return orig_owned_span_texts(*args, **kwargs)
+                except TypeError:
+                    return None
+            mineru_native._owned_span_texts = safe_owned_span_texts
+        except Exception:
+            pass
+
         from mineru.parser import parse as local_parse
         from mineru.kit.common import save_parse_result
         from mineru.types import validate_tier
