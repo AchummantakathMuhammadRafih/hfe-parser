@@ -49,7 +49,7 @@ hfe-parser/
 ## Getting Started
 
 ### 1. Prerequisites
-- Python 3.10 to 3.13
+- Python 3.12
 - Virtual environment (recommended)
 
 ### 2. Installation
