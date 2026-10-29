@@ -30,32 +30,20 @@ def run_conversion_task(task: dict):
 
     update_task_status(task_id, "processing", progress_msg=f"Initializing MinerU ({device.upper()}, tier: {tier})...")
 
-    # Locate executable: either mineru-kit executable or python -m mineru.kit.main
-    venv_dir = os.path.dirname(sys.executable)
-    mineru_kit_exe = os.path.join(venv_dir, "mineru-kit.exe")
-    mineru_kit_cmd = os.path.join(venv_dir, "mineru-kit")
-    
-    if os.path.exists(mineru_kit_exe):
-        cmd = [mineru_kit_exe]
-    elif os.path.exists(mineru_kit_cmd):
-        cmd = [mineru_kit_cmd]
-    else:
-        # Fallback to module invocation
-        cmd = [sys.executable, "-m", "mineru.kit.main"]
-
+    # Use parse_runner.py to execute local_parse directly with full unhandled stack traces
     base_stem = os.path.splitext(filename)[0]
     zip_dest = os.path.join(output_dir, f"{base_stem}_parsed.zip")
+    runner_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parse_runner.py")
 
-    cmd.extend([
-        "parse",
+    cmd = [
+        sys.executable,
+        runner_script,
         pdf_path,
-        "-o", zip_dest,
-        "-f", "zip",
-        "--pages", pages,
-        "--tier", tier,
-        "--ocr-mode", ocr_mode,
-        "-v"
-    ])
+        tier,
+        ocr_mode,
+        pages,
+        zip_dest
+    ]
 
     # Environment configuration for CPU vs GPU, full tracebacks, and UTF-8 encoding
     env = os.environ.copy()
