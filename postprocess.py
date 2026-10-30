@@ -99,9 +99,9 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
 
     Rules:
       - Case 1: L1 == L2 (e.g. ## H1 followed by ## H2 without text)
-        -> Merged as: ## H1 - H2
+        -> Merged as: ## H1 H2
       - Case 2: L1 > L2 (e.g. ### H1 followed by ## H2 without text)
-        -> Merged as: ## H1 - H2 (takes min(L1, L2), the higher hierarchy level)
+        -> Merged as: ## H1 H2 (takes min(L1, L2), the higher hierarchy level)
       - Case 3: L1 < L2 (e.g. ## H1 followed by ### H2 without text)
         -> Kept as-is (valid parent-child hierarchy)
       - Content inside code blocks (```) is never touched.
@@ -160,7 +160,7 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
                 # Case 1 (L1 == L2) or Case 2 (L1 > L2)
                 if l1 >= l2:
                     target_level = min(l1, l2)
-                    new_title = f"{tokens[i]['title']} - {tokens[j]['title']}"
+                    new_title = f"{tokens[i]['title']} {tokens[j]['title']}"
                     hashes = "#" * target_level
                     tokens[i]["level"] = target_level
                     tokens[i]["title"] = new_title
@@ -234,6 +234,106 @@ def remove_markdown_images(content: str) -> Tuple[str, int]:
     return result, removed_count
 
 
+def sanitize_duplicate_heading_title(title: str) -> str:
+    """
+    Sanitizes duplicate patterns in headings like:
+      'CHANGING LEADERSHIP BEHAVIOUR CHANGING LEADERSHIP BEHAVIOUR'
+      -> 'CHANGING LEADERSHIP BEHAVIOUR'
+      'IMPROVING INTERACTIONS WITH TECHNOLOGY IMPROVING INTERACTIONS WITH TECHNOLOGY'
+      -> 'IMPROVING INTERACTIONS WITH TECHNOLOGY'
+      'CHANGING - LEADERSHIP - BEHAVIOUR - CHANGING LEADERSHIP BEHAVIOUR'
+      -> 'CHANGING LEADERSHIP BEHAVIOUR'
+    Supports both space-delimited and hyphen-delimited merged headings.
+    """
+    from difflib import SequenceMatcher
+
+    def norm(s: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9]', '', s).lower()
+
+    def check_split(parts: List[str]) -> Optional[str]:
+        candidates = []
+        for split_idx in range(1, len(parts)):
+            prefix = ' '.join(parts[:split_idx])
+            suffix = ' '.join(parts[split_idx:])
+
+            np = norm(prefix)
+            ns = norm(suffix)
+
+            if not np or not ns:
+                continue
+
+            # Exact match of normalized text
+            if np == ns:
+                return suffix
+
+            # High similarity match (tolerates OCR typos/ligatures, e.g. 'STA' vs 'STAFF')
+            ratio = SequenceMatcher(None, np, ns).ratio()
+            if ratio >= 0.85 and min(len(np), len(ns)) >= 8:
+                candidates.append((ratio, abs(len(np) - len(ns)), suffix if len(suffix) >= len(prefix) else prefix))
+
+        if candidates:
+            # Prefer highest similarity match, then closest balance
+            candidates.sort(key=lambda x: (-x[0], x[1]))
+            return candidates[0][2]
+        return None
+
+    # 1. Hyphen-delimited check (e.g. from existing hyphens or hyphenated headings)
+    hyphen_parts = [p.strip() for p in re.split(r'\s+-\s+', title) if p.strip()]
+    if len(hyphen_parts) > 1:
+        res = check_split(hyphen_parts)
+        if res:
+            return res
+
+    # 2. Word/space-delimited check (e.g. from space-merged consecutive headings)
+    word_parts = [p.strip() for p in title.split() if p.strip()]
+    if len(word_parts) > 1:
+        res = check_split(word_parts)
+        if res:
+            return res
+
+    return title
+
+
+def sanitize_duplicate_markdown_headings(content: str) -> Tuple[str, int]:
+    """
+    Pipeline step to scan and sanitize duplicated text inside headings throughout markdown.
+    Preserves code blocks untouched.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return content, 0
+
+    sanitized_count = 0
+    in_code_block = False
+    output_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if is_fenced_code_boundary(line):
+            in_code_block = not in_code_block
+            output_lines.append(line)
+            continue
+
+        if in_code_block:
+            output_lines.append(line)
+            continue
+
+        m = HEADING_REGEX.match(stripped)
+        if m:
+            level_str = m.group(1)
+            title = m.group(2).strip()
+            cleaned_title = sanitize_duplicate_heading_title(title)
+            if cleaned_title != title:
+                sanitized_count += 1
+                output_lines.append(f"{level_str} {cleaned_title}\n")
+            else:
+                output_lines.append(line)
+        else:
+            output_lines.append(line)
+
+    return "".join(output_lines), sanitized_count
+
+
 def postprocess_zip_markdown(zip_path: str, output_dir: Optional[str] = None) -> Tuple[int, int, int]:
     """
     Extracts markdown files from the zip archive:
@@ -280,7 +380,7 @@ def postprocess_zip_markdown(zip_path: str, output_dir: Optional[str] = None) ->
                     from custom_markdown import normalize_heading_skipped_levels
                     smoothed = normalize_heading_skipped_levels(denoised_text)
 
-                    # 2b: Merge consecutive headings without body text (e.g. ## H1 followed by ## H2 -> ## H1 - H2)
+                    # 2b: Merge consecutive headings without body text (e.g. ## H1 followed by ## H2 -> ## H1 H2)
                     cleaned, count = clean_markdown_heading_hierarchy(smoothed)
                     total_merges += count
 
@@ -292,8 +392,14 @@ def postprocess_zip_markdown(zip_path: str, output_dir: Optional[str] = None) ->
                         redacted_text = cleaned
 
                     # Pipeline Step 4: Remove images from the markdown
-                    final_text, img_count = remove_markdown_images(redacted_text)
+                    images_removed_text, img_count = remove_markdown_images(redacted_text)
                     total_images_removed += img_count
+
+                    # Pipeline Step 5: Sanitize duplicate headers (just before zipping)
+                    # e.g. '# CHANGING LEADERSHIP BEHAVIOUR CHANGING LEADERSHIP BEHAVIOUR' -> '# CHANGING LEADERSHIP BEHAVIOUR'
+                    final_text, dups_sanitized = sanitize_duplicate_markdown_headings(images_removed_text)
+                    if dups_sanitized > 0:
+                        print(f"[Post-Process] Heading duplicates sanitized ({dups_sanitized} headings cleaned).")
 
                     # Save to zip (only the final processed markdown)
                     zout.writestr(item, final_text.encode("utf-8"))
