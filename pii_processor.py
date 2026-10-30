@@ -42,7 +42,6 @@ TARGET_ENTITIES = [
     "US_PASSPORT",
     "US_SSN",
     "MEDICAL_LICENSE",
-    "LOCATION",
 ]
 
 def is_fenced_code_boundary(line: str) -> bool:
