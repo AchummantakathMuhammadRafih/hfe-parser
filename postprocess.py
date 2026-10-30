@@ -10,6 +10,89 @@ def is_fenced_code_boundary(line: str) -> bool:
     stripped = line.strip()
     return stripped.startswith("```") or stripped.startswith("~~~")
 
+def is_noise_markdown_line(line: str) -> bool:
+    """
+    Checks if a markdown line is noise:
+    1. Plain numeric line (e.g. '4', '44', '# 44', '  27  ', '2.1').
+    2. Short noise text with fewer than 3 alphabetic letters (e.g. 'II', 'C', '## A').
+    Preserves markdown tables, blockquotes, list items, code fences, and horizontal rules.
+    """
+    s = line.strip()
+    if not s:
+        return False
+
+    # Never treat markdown structural markers or code fences as noise
+    if s.startswith(('|', '>', '```', '~~~', '<')):
+        return False
+
+    # Horizontal rules (e.g. ---, ***, ___)
+    if re.fullmatch(r'[-*_]{3,}', s):
+        return False
+
+    # List items (- item, * item, 1. item)
+    if re.match(r'^[-*+]\s+', s) or re.match(r'^\d+\.\s+', s):
+        item_text = re.sub(r'^[-*+]\s+', '', s)
+        item_text = re.sub(r'^\d+\.\s+', '', item_text).strip()
+        letters = re.findall(r'[a-zA-Z]', item_text)
+        digits = re.findall(r'\d', item_text)
+        if not letters and not digits:
+            return True
+        return False
+
+    # Check headings or standalone text line
+    m = HEADING_REGEX.match(s)
+    text = m.group(2).strip() if m else s
+
+    # Strip surrounding punct / symbols
+    stripped = re.sub(r'^[#\s\.\-\–\—\(\)\[\]/]+', '', text)
+    stripped = re.sub(r'[#\s\.\-\–\—\(\)\[\]/]+$', '', stripped)
+
+    # 1. Plain numeric line (e.g. '4', '44', '# 44')
+    if re.fullmatch(r'^\d+([.,]\d+)*$', stripped):
+        return True
+
+    # 2. Text with fewer than 3 alphabetic letters
+    letters = re.findall(r'[a-zA-Z]', text)
+    if len(letters) < 3 and not re.search(r'\d', text):
+        return True
+
+    return False
+
+def filter_document_noise_lines(content: str) -> Tuple[str, int]:
+    """
+    Filters out noise lines (e.g., '# 44', '4', 'II', '< 3 letters') BEFORE any
+    other pipeline processing (heading normalization, merging, redaction, stripping).
+    Preserves content inside code fences.
+    """
+    lines = content.splitlines(keepends=True)
+    if not lines:
+        return content, 0
+
+    filtered_lines = []
+    removed_count = 0
+    in_code_block = False
+
+    for line in lines:
+        if is_fenced_code_boundary(line):
+            in_code_block = not in_code_block
+            filtered_lines.append(line)
+            continue
+
+        if in_code_block:
+            filtered_lines.append(line)
+            continue
+
+        if is_noise_markdown_line(line):
+            removed_count += 1
+            continue
+
+        filtered_lines.append(line)
+
+    result = "".join(filtered_lines)
+    # Collapse 3+ consecutive newlines into 2 (single blank line between paragraphs)
+    result = re.sub(r'\n{3,}', '\n\n', result)
+    return result, removed_count
+
 def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
     """
     Cleans consecutive markdown headings that have no body paragraph between them.
@@ -186,23 +269,29 @@ def postprocess_zip_markdown(zip_path: str, output_dir: Optional[str] = None) ->
                 try:
                     text = data.decode("utf-8", errors="replace")
 
-                    # Pipeline Step 1: Heading hierarchy normalization
-                    # 1a: Smooth skipped heading levels (e.g., ## -> #### becomes ## -> ###)
-                    from custom_markdown import normalize_heading_skipped_levels
-                    smoothed = normalize_heading_skipped_levels(text)
+                    # Pipeline Step 1: UPFRONT Noise filtering
+                    # Filters out stray numbers, isolated letters, and noise lines before anything else
+                    denoised_text, noise_removed = filter_document_noise_lines(text)
+                    if noise_removed > 0:
+                        print(f"[Post-Process] Noise filtered ({noise_removed} noise lines dropped).")
 
-                    # 1b: Merge consecutive headings without body text (e.g. ## H1 followed by ## H2 -> ## H1 - H2)
+                    # Pipeline Step 2: Heading hierarchy normalization
+                    # 2a: Smooth skipped heading levels (e.g., # -> ### becomes # -> ##)
+                    from custom_markdown import normalize_heading_skipped_levels
+                    smoothed = normalize_heading_skipped_levels(denoised_text)
+
+                    # 2b: Merge consecutive headings without body text (e.g. ## H1 followed by ## H2 -> ## H1 - H2)
                     cleaned, count = clean_markdown_heading_hierarchy(smoothed)
                     total_merges += count
 
-                    # Pipeline Step 2: Presidio PII detection and enclosure masking
+                    # Pipeline Step 3: Presidio PII detection and enclosure masking
                     try:
                         redacted_text, pii_count = mask_pii_markdown(cleaned)
                         total_pii += pii_count
                     except Exception:
                         redacted_text = cleaned
 
-                    # Pipeline Step 3: Remove images from the markdown
+                    # Pipeline Step 4: Remove images from the markdown
                     final_text, img_count = remove_markdown_images(redacted_text)
                     total_images_removed += img_count
 

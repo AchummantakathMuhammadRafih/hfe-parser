@@ -69,6 +69,160 @@ from docvortex.render._internal.markdown.blocks import (
 )
 
 
+def is_visual_block(block: Any) -> bool:
+    """Checks whether a block represents an image or chart."""
+    btype = getattr(block, "type", None)
+    if btype in (BlockType.IMAGE, BlockType.CHART, "image", "chart"):
+        return True
+    return False
+
+
+def extract_visual_block_annotations(block: Any, delimiters: LatexDelimitersConfig) -> List[str]:
+    """Extracts caption/footnote annotations from an ImageBlock or ChartBlock."""
+    from docvortex.render._internal.markdown.blocks import render_visual_annotation
+    annotations = []
+    content = getattr(block, "content", [])
+    if isinstance(content, list):
+        for child in content:
+            child_type = getattr(child, "type", None)
+            if child_type in (
+                BlockType.IMAGE_CAPTION,
+                BlockType.IMAGE_FOOTNOTE,
+                BlockType.CHART_CAPTION,
+                BlockType.CHART_FOOTNOTE,
+                "image_caption",
+                "image_footnote",
+                "chart_caption",
+                "chart_footnote",
+            ):
+                try:
+                    text = render_visual_annotation(child, delimiters)
+                    if text and text.strip():
+                        annotations.append(text.strip())
+                except Exception:
+                    pass
+    return annotations
+
+
+def _get_page_clip_rect(page: fitz.Page, bbox: List[float]) -> Optional[fitz.Rect]:
+    """Converts bbox (normalized or absolute) to a valid fitz.Rect with a slight inset."""
+    if not bbox or len(bbox) != 4:
+        return None
+    x0, y0, x1, y1 = bbox
+    w, h = page.rect.width, page.rect.height
+    if max(x0, y0, x1, y1) <= 1.05:
+        rect = fitz.Rect(x0 * w, y0 * h, x1 * w, y1 * h)
+    else:
+        rect = fitz.Rect(x0, y0, x1, y1)
+
+    clip_rect = rect + (1, 1, -1, -1)
+    if clip_rect.is_empty or not clip_rect.is_valid:
+        clip_rect = rect
+    return clip_rect
+
+
+def scan_visual_block_heading_sizes(pdf_page: fitz.Page, bbox: List[float]) -> Set[float]:
+    """
+    Scans selectable text inside a visual block for candidate heading font sizes.
+    Lines must satisfy heading candidate criteria (e.g. >= 3 letters, not numbers).
+    """
+    found_sizes: Set[float] = set()
+    clip_rect = _get_page_clip_rect(pdf_page, bbox)
+    if not clip_rect:
+        return found_sizes
+
+    try:
+        text_dict = pdf_page.get_text("dict", clip=clip_rect)
+        for block in text_dict.get("blocks", []):
+            for line in block.get("lines", []):
+                line_spans = line.get("spans", [])
+                line_text = " ".join(s.get("text", "").strip() for s in line_spans if s.get("text", "").strip()).strip()
+                if not is_valid_heading_candidate(line_text):
+                    continue
+
+                # Get the dominant font size of this candidate line
+                size_counts = Counter()
+                for span in line_spans:
+                    stext = span.get("text", "").strip()
+                    ssize = round(float(span.get("size", 0)), 1)
+                    if stext and ssize > 0:
+                        size_counts[ssize] += len(stext)
+
+                if size_counts:
+                    dom_size, _ = size_counts.most_common(1)[0]
+                    if dom_size > 0:
+                        found_sizes.add(dom_size)
+    except Exception:
+        pass
+
+    return found_sizes
+
+
+def extract_superimposed_elements_from_pdf(
+    pdf_page: fitz.Page,
+    bbox: List[float],
+    font_level_map: Dict[float, int],
+) -> List[str]:
+    """
+    Extracts selectable digital text located inside a visual block's bounding box.
+    Runs each line through the heading inference process:
+    - If a line's dominant font size matches the heading map, it is rendered as '# Heading'.
+    - Otherwise, it is rendered as body text.
+    Consecutive body lines within the same block are grouped into paragraphs.
+    """
+    clip_rect = _get_page_clip_rect(pdf_page, bbox)
+    if not clip_rect:
+        return []
+
+    elements: List[str] = []
+
+    try:
+        text_dict = pdf_page.get_text("dict", clip=clip_rect)
+        for block in text_dict.get("blocks", []):
+            current_paragraph_lines: List[str] = []
+
+            for line in block.get("lines", []):
+                line_spans = line.get("spans", [])
+                line_text = " ".join(s.get("text", "").strip() for s in line_spans if s.get("text", "").strip()).strip()
+                if not line_text:
+                    continue
+
+                # Determine dominant font size for this line
+                size_counts = Counter()
+                for span in line_spans:
+                    stext = span.get("text", "").strip()
+                    ssize = round(float(span.get("size", 0)), 1)
+                    if stext and ssize > 0:
+                        size_counts[ssize] += len(stext)
+
+                dom_size = size_counts.most_common(1)[0][0] if size_counts else None
+
+                # Check if this line is an inferred heading
+                if (
+                    dom_size is not None
+                    and dom_size in font_level_map
+                    and is_valid_heading_candidate(line_text)
+                ):
+                    # Flush any accumulated body lines into a paragraph
+                    if current_paragraph_lines:
+                        elements.append(" ".join(current_paragraph_lines))
+                        current_paragraph_lines = []
+
+                    level = font_level_map[dom_size]
+                    level = min(max(level, 1), 6)
+                    elements.append(f"{'#' * level} {line_text}")
+                else:
+                    current_paragraph_lines.append(line_text)
+
+            if current_paragraph_lines:
+                elements.append(" ".join(current_paragraph_lines))
+
+    except Exception:
+        pass
+
+    return elements
+
+
 def extract_raw_text(block: Any) -> str:
     """Extracts raw plain text string from a block."""
     content = getattr(block, "content", None)
@@ -214,14 +368,41 @@ def is_skipped_aux_block(block: Any) -> bool:
     return False
 
 
+def detect_base_body_font_size(doc: fitz.Document) -> float:
+    """
+    Detects the dominant body text font size across the document by character count.
+    Body text typically represents >50% of characters in any standard document.
+    """
+    font_char_counts = Counter()
+    for page in doc:
+        try:
+            td = page.get_text("dict")
+            for b in td.get("blocks", []):
+                for l in b.get("lines", []):
+                    for s in l.get("spans", []):
+                        t = s.get("text", "").strip()
+                        sz = round(float(s.get("size", 0)), 1)
+                        if t and sz > 0:
+                            font_char_counts[sz] += len(t)
+        except Exception:
+            continue
+
+    if font_char_counts:
+        base_size, _ = font_char_counts.most_common(1)[0]
+        return base_size
+    return 10.0  # Fallback standard
+
+
 def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float, int]:
     """
     Step 1: Iterate through candidate heading blocks.
     - Filters out plain numbers and short noise (< 3 letters).
+    - Detects document's base body font size dynamically.
+    - Discards any candidate font size <= base_body_size + 0.5 (filters out body text, footnotes, chart noise).
     - Scans the PDF area for the PARTICULAR heading text words only.
-    - Sorts unique dominant font sizes descending: largest -> Level 1, next -> Level 2, etc.
+    - Sorts unique dominant font sizes descending: largest -> Level 1 (#), next -> Level 2 (##), etc.
     """
-    title_sizes: Set[float] = set()
+    candidate_sizes: Set[float] = set()
 
     try:
         doc = fitz.open(pdf_path)
@@ -230,6 +411,11 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
         return {}
 
     try:
+        base_body_size = detect_base_body_font_size(doc)
+        # Genuine headings must be strictly larger than body text (noise threshold)
+        noise_threshold = round(base_body_size + 0.8, 1)
+        print(f"[CustomMarkdown] Base body font size detected: {base_body_size} pt (Heading threshold > {noise_threshold} pt)")
+
         for page_elem in middle_json.pages:
             page_idx = page_elem.page_idx
             if page_idx < 0 or page_idx >= len(doc):
@@ -246,18 +432,25 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
                     bbox = getattr(block, "bbox", None)
                     if bbox:
                         dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text)
-                        if dom_size is not None and dom_size > 0:
-                            title_sizes.add(dom_size)
+                        if dom_size is not None and dom_size > noise_threshold:
+                            candidate_sizes.add(dom_size)
+                elif is_visual_block(block):
+                    bbox = getattr(block, "bbox", None)
+                    if bbox:
+                        visual_heading_sizes = scan_visual_block_heading_sizes(pdf_page, bbox)
+                        for vs in visual_heading_sizes:
+                            if vs > noise_threshold:
+                                candidate_sizes.add(vs)
     finally:
         doc.close()
 
     # Sort descending: largest font size -> Level 1 (#), 2nd largest -> Level 2 (##), etc.
-    sorted_sizes = sorted(title_sizes, reverse=True)
+    sorted_sizes = sorted(candidate_sizes, reverse=True)
     font_level_map: Dict[float, int] = {}
     for idx, size in enumerate(sorted_sizes):
         font_level_map[size] = min(idx + 1, 6)
 
-    print(f"[CustomMarkdown] Filtered heading font sizes: {sorted_sizes} -> Level Map: {font_level_map}")
+    print(f"[CustomMarkdown] Filtered genuine heading font sizes: {sorted_sizes} -> Level Map: {font_level_map}")
     return font_level_map
 
 
@@ -280,7 +473,7 @@ def _render_custom_title(
         content_text = render_title_inline_content(block, delimiters)
         return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
 
-    level = getattr(block, "level", 1)
+    level = None
 
     if pdf_doc and 0 <= page_idx < len(pdf_doc) and font_level_map:
         bbox = getattr(block, "bbox", None)
@@ -288,6 +481,12 @@ def _render_custom_title(
             dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text)
             if dom_size in font_level_map:
                 level = font_level_map[dom_size]
+
+    # If font size is below noise threshold and not in genuine heading map,
+    # render it as regular body text rather than forcing it as a heading
+    if level is None:
+        content_text = render_title_inline_content(block, delimiters)
+        return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
 
     level = min(max(level, 1), 6)
     title_text = render_title_inline_content(block, delimiters)
@@ -340,8 +539,37 @@ def render_custom_markdown(
                 if is_skipped_aux_block(block):
                     continue
 
-                # Skip images from markdown output
-                if getattr(block, "type", None) == BlockType.IMAGE:
+                # Handle images and charts:
+                # Discard the image asset, but run superimposed digital text through
+                # heading inference and preserve any captions/annotations.
+                if is_visual_block(block):
+                    visual_elements: List[str] = []
+                    # 1. Recover superimposed digital text inside the visual bounding box
+                    # and infer heading levels for lines matching candidate heading font sizes
+                    if pdf_doc and 0 <= planned.page_idx < len(pdf_doc):
+                        bbox = getattr(block, "bbox", None)
+                        if bbox:
+                            inferred_elements = extract_superimposed_elements_from_pdf(
+                                pdf_doc[planned.page_idx],
+                                bbox,
+                                font_level_map,
+                            )
+                            visual_elements.extend(inferred_elements)
+
+                    # 2. Extract any captions or footnotes attached to the block
+                    annotations = extract_visual_block_annotations(block, delimiters)
+                    for ann in annotations:
+                        if ann not in visual_elements:
+                            visual_elements.append(ann)
+
+                    for elem in visual_elements:
+                        # If the element is an inferred ATX heading (starts with '#'), do not escape the '#' prefix!
+                        if re.match(r'^#{1,6}\s+', elem):
+                            rendered = elem
+                        else:
+                            rendered = escape_standalone_marker_rule(escape_text_block_markdown_prefix(elem))
+                        if rendered:
+                            rendered_blocks.append(rendered)
                     continue
 
                 # Custom Title rendering with targeted font-size level mapping
@@ -433,15 +661,15 @@ def render_custom_markdown(
 def normalize_heading_skipped_levels(markdown_text: str) -> str:
     """
     Normalizes heading hierarchy throughout markdown so that skipped intermediate levels
-    are smoothly stepped down without gaps.
+    are smoothly stepped down without gaps (e.g. # -> ### becomes # -> ##), while keeping
+    identical original levels consistent within the same parent scope.
+
     Example:
-      ## Heading 2
-      #### Heading 4 (skipped level 3)
-      ###### Heading 6 (skipped level 5)
-    becomes:
-      ## Heading 2
-      ### Heading 4
-      #### Heading 6
+      # OPTIMISING - PRODUCT IMAGES
+      ### THE PROBLEM   -> becomes ## THE PROBLEM
+      ... body paragraph ...
+      ### THE SOLUTION  -> becomes ## THE SOLUTION (sibling of THE PROBLEM!)
+      #### Sub-item     -> becomes ### Sub-item
 
     Preserves code fences (``` or ~~~).
     """
@@ -449,7 +677,9 @@ def normalize_heading_skipped_levels(markdown_text: str) -> str:
     lines = markdown_text.splitlines(keepends=True)
     output_lines = []
     in_code_block = False
-    last_heading_level = 0
+
+    # Heading hierarchy stack: records {'orig': original_level, 'new': mapped_level}
+    heading_stack: List[Dict[str, int]] = []
 
     for line in lines:
         stripped = line.strip()
@@ -467,18 +697,20 @@ def normalize_heading_skipped_levels(markdown_text: str) -> str:
             orig_level = len(m.group(1))
             title = m.group(2)
 
-            if last_heading_level == 0:
-                # First heading in document
-                new_level = orig_level
+            # Pop any previous headings that are deeper than or equal to current orig_level
+            while heading_stack and heading_stack[-1]["orig"] >= orig_level:
+                heading_stack.pop()
+
+            if not heading_stack:
+                # Top-level heading
+                new_level = 1
             else:
-                # If it jumps down deeper by more than 1 level (e.g. 2 -> 4)
-                if orig_level > last_heading_level + 1:
-                    new_level = last_heading_level + 1
-                else:
-                    new_level = orig_level
+                # Sibling or child under parent
+                parent_new = heading_stack[-1]["new"]
+                new_level = parent_new + 1
 
             new_level = min(max(new_level, 1), 6)
-            last_heading_level = new_level
+            heading_stack.append({"orig": orig_level, "new": new_level})
             output_lines.append(f"{'#' * new_level} {title}\n")
         else:
             output_lines.append(line)
