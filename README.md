@@ -107,6 +107,13 @@ python3 -c "from mineru.model.vlm.selector import resolve_vlm_engine; print('Sel
 ```
 *Expected output: `Selected VLM Engine: lmdeploy`*
 
+### 5. Tune Page Batch Size & GPU Throughput (Optional)
+MinerU processes document pages in chunks/windows (default is 64). On GPUs with 16GB–24GB+ VRAM, increase the page batch window size to maximize GPU saturation and throughput:
+```bash
+export MINERU_PROCESSING_WINDOW_SIZE=256
+```
+*(On Windows PowerShell, use: `$env:MINERU_PROCESSING_WINDOW_SIZE="256"`)*
+
 ---
 
 ## Running the Application
