@@ -24,6 +24,7 @@ def init_db():
                 device TEXT NOT NULL DEFAULT 'cpu',
                 tier TEXT NOT NULL DEFAULT 'standard',
                 pages TEXT NOT NULL DEFAULT 'all',
+                ocr_mode TEXT NOT NULL DEFAULT 'auto',
                 status TEXT NOT NULL DEFAULT 'pending',
                 progress_msg TEXT DEFAULT 'Queued',
                 error_message TEXT,
@@ -32,15 +33,20 @@ def init_db():
                 completed_at TIMESTAMP
             )
         """)
+        # Migration: ensure ocr_mode column exists in existing DBs
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN ocr_mode TEXT NOT NULL DEFAULT 'auto'")
+        except Exception:
+            pass
         conn.commit()
 
-def add_task(filename: str, pdf_path: str, output_dir: str, log_path: str, device: str = "cpu", tier: str = "standard", pages: str = "all") -> int:
+def add_task(filename: str, pdf_path: str, output_dir: str, log_path: str, device: str = "cpu", tier: str = "standard", pages: str = "all", ocr_mode: str = "auto") -> int:
     with get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO tasks (filename, pdf_path, output_dir, log_path, device, tier, pages, status, progress_msg, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', 'Queued for processing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-        """, (filename, pdf_path, output_dir, log_path, device, tier, pages))
+            INSERT INTO tasks (filename, pdf_path, output_dir, log_path, device, tier, pages, ocr_mode, status, progress_msg, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'Queued for processing', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+        """, (filename, pdf_path, output_dir, log_path, device, tier, pages, ocr_mode))
         conn.commit()
         return cursor.lastrowid
 

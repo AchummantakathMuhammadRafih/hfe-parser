@@ -11,6 +11,32 @@ from database import (
 )
 from packager import create_result_zip
 
+# Ensure sys.stdout and sys.stderr handle UTF-8 / non-ASCII characters without raising charmap encoding errors on Windows
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
+def safe_print(*args, **kwargs):
+    """Print to console without failing if terminal encoding cannot encode a character."""
+    try:
+        print(*args, **kwargs)
+    except UnicodeEncodeError:
+        try:
+            # Fallback: encode with replace then decode or write raw bytes
+            sep = kwargs.get("sep", " ")
+            end = kwargs.get("end", "\n")
+            text = sep.join(str(a) for a in args) + end
+            sys.stdout.buffer.write(text.encode(sys.stdout.encoding or "utf-8", errors="replace"))
+            sys.stdout.buffer.flush()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 _worker_thread = None
 _stop_event = threading.Event()
 
@@ -35,8 +61,12 @@ def run_conversion_task(task: dict):
     zip_dest = os.path.join(output_dir, f"{base_stem}_parsed.zip")
     runner_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parse_runner.py")
 
+    # Prefer virtual environment python if it exists in the project root
+    venv_python = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".venv", "Scripts", "python.exe")
+    python_exec = venv_python if os.path.exists(venv_python) else sys.executable
+
     cmd = [
-        sys.executable,
+        python_exec,
         runner_script,
         pdf_path,
         tier,
@@ -73,7 +103,7 @@ def run_conversion_task(task: dict):
         log_file.write(log_header)
         log_file.flush()
         # Also print to console/terminal running streamlit
-        print(log_header, flush=True)
+        safe_print(log_header, flush=True)
 
         try:
             update_task_status(task_id, "processing", progress_msg="Loading models & parsing layout...")
@@ -96,7 +126,7 @@ def run_conversion_task(task: dict):
                 log_file.write(line)
                 log_file.flush()
                 # Print to terminal/console so user sees it in their terminal
-                print(f"[Task #{task_id}] {line}", end="", flush=True)
+                safe_print(f"[Task #{task_id}] {line}", end="", flush=True)
 
                 clean_line = line.strip()
 
@@ -119,7 +149,7 @@ def run_conversion_task(task: dict):
                 success_msg = f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] MinerU conversion succeeded.\nVerifying output bundle...\n"
                 log_file.write(success_msg)
                 log_file.flush()
-                print(f"[Task #{task_id}] {success_msg}", flush=True)
+                safe_print(f"[Task #{task_id}] {success_msg}", flush=True)
 
                 # Also extract markdown to folder for immediate preview if needed
                 zip_path = zip_dest if (os.path.exists(zip_dest) and os.path.getsize(zip_dest) > 0) else None
@@ -147,28 +177,30 @@ def run_conversion_task(task: dict):
                     )
                     log_file.write(post_msg)
                     log_file.flush()
-                    print(f"[Task #{task_id}] {post_msg}", flush=True)
+                    safe_print(f"[Task #{task_id}] {post_msg}", flush=True)
                 except Exception as p_err:
                     log_file.write(f"[Post-Process Notice] Post-processing note: {p_err}\n")
                     log_file.flush()
 
                 log_file.write(f"Archive ready: {zip_path}\n")
                 log_file.flush()
-                print(f"[Task #{task_id}] Archive ready: {zip_path}\n", flush=True)
+                safe_print(f"[Task #{task_id}] Archive ready: {zip_path}\n", flush=True)
 
                 update_task_status(task_id, "completed", progress_msg="Completed successfully", zip_path=zip_path)
             else:
                 err_msg = f"MinerU process exited with code {process.returncode}"
                 log_file.write(f"\n[ERROR] {err_msg}\n")
                 log_file.flush()
-                print(f"[Task #{task_id}] [ERROR] {err_msg}\n", flush=True)
+                safe_print(f"[Task #{task_id}] [ERROR] {err_msg}\n", flush=True)
                 update_task_status(task_id, "failed", progress_msg="Failed", error_message=err_msg)
 
         except Exception as e:
+            import traceback
+            tb_str = traceback.format_exc()
             err_msg = f"Exception during execution: {str(e)}"
-            log_file.write(f"\n[FATAL ERROR] {err_msg}\n")
+            log_file.write(f"\n[FATAL ERROR] {err_msg}\n{tb_str}\n")
             log_file.flush()
-            print(f"[Task #{task_id}] [FATAL ERROR] {err_msg}\n", flush=True)
+            safe_print(f"[Task #{task_id}] [FATAL ERROR] {err_msg}\n{tb_str}", flush=True)
             update_task_status(task_id, "failed", progress_msg="Error encountered", error_message=err_msg)
 
 def worker_loop():
@@ -179,7 +211,7 @@ def worker_loop():
             try:
                 run_conversion_task(task)
             except Exception as e:
-                print(f"[Worker Exception] {e}", flush=True)
+                safe_print(f"[Worker Exception] {e}", flush=True)
                 update_task_status(task["id"], "failed", error_message=str(e))
         else:
             time.sleep(2)

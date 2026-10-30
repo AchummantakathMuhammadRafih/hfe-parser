@@ -1,9 +1,22 @@
 import os
+import sys
 import shutil
 import time
 import streamlit as st
 from datetime import datetime
 import torch
+
+# Ensure standard streams handle Unicode characters on Windows
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 from database import (
     init_db,
@@ -171,7 +184,8 @@ with st.expander("📤 Upload New Documents to Queue", expanded=True):
                 log_path=task_log_path,
                 device=selected_device.lower(),
                 tier=tier_choice.lower(),
-                pages=custom_pages
+                pages=custom_pages,
+                ocr_mode=ocr_mode.lower()
             )
             added_count += 1
 
@@ -232,7 +246,8 @@ else:
                 st.caption(f"Added: {created_at} | Pages: {task.get('pages', 'all')}")
             
             with rcol2:
-                st.markdown(f"`{device}` | `{tier}`")
+                task_ocr = task.get("ocr_mode", "auto")
+                st.markdown(f"`{device}` | `{tier}` | `{task_ocr}`")
 
             with rcol3:
                 st.markdown(status_html, unsafe_allow_html=True)

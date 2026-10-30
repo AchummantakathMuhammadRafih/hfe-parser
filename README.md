@@ -52,7 +52,7 @@ hfe-parser/
 - Python 3.12
 - Virtual environment (recommended)
 
-### 2. Installation
+### 2. Installation (Local / CPU)
 
 1. Activate your virtual environment (if not already activated):
    ```powershell
@@ -62,24 +62,65 @@ hfe-parser/
 2. Install dependencies:
    ```powershell
    pip install -r requirements.txt
+   python -m spacy download en_core_web_sm
    ```
 
-*(Optional for NVIDIA GPU acceleration)*:
-Install the PyTorch GPU build compatible with your CUDA version from [pytorch.org](https://pytorch.org/).
+---
+
+## Remote GPU Setup & Acceleration (NVIDIA CUDA)
+
+To achieve maximum throughput (15–30+ pages/sec) on a remote GPU VM (e.g., RTX 3060/3090/4090, A10G, T4, L4):
+
+### 1. System Libraries (Ubuntu/Debian)
+Install essential rendering and media libraries required by PDF layout engines:
+```bash
+sudo apt update && sudo apt install -y ffmpeg libsm6 libxext6 libgl1
+```
+
+### 2. Install PyTorch with CUDA
+Install PyTorch compiled for your VM's CUDA version (e.g., CUDA 12.4):
+```bash
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+```
+
+Verify GPU detection:
+```bash
+python3 -c "import torch; print('CUDA Available:', torch.cuda.is_available(), '| GPU:', torch.cuda.get_device_name(0))"
+```
+
+### 3. Install Requirements & NLP Model
+```bash
+pip install -r requirements.txt
+python3 -m spacy download en_core_web_sm
+```
+
+### 4. Enable GPU VLM Engine (`lmdeploy` or `vllm`)
+> [!IMPORTANT]
+> By default, MinerU falls back to `llama-cpp-engine` on the CPU (~1 page/sec) if an accelerated VLM engine is not installed. To unlock full GPU Tensor Core acceleration for layout detection, install **`lmdeploy`** (recommended) or **`vllm`**:
+```bash
+pip install lmdeploy
+```
+
+Verify that MinerU selects the GPU VLM backend:
+```bash
+python3 -c "from mineru.model.vlm.selector import resolve_vlm_engine; print('Selected VLM Engine:', resolve_vlm_engine())"
+```
+*Expected output: `Selected VLM Engine: lmdeploy`*
 
 ---
 
 ## Running the Application
 
-Launch the Streamlit app:
+### Local Machine:
 ```powershell
 streamlit run app.py
 ```
 
-Once started, open your browser and navigate to:
+### Remote GPU VM (Accessible via Browser):
+```bash
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 ```
-http://localhost:8501
-```
+*(Or use SSH tunneling from your local machine: `ssh -N -L 8501:localhost:8501 user@<vm-ip>` and browse to `http://localhost:8501`)*.
 
 ---
 
