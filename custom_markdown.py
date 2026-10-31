@@ -209,8 +209,11 @@ def extract_superimposed_elements_from_pdf(
                         current_paragraph_lines = []
 
                     level = font_level_map[dom_size]
-                    level = max(level, 1)
-                    elements.append(f"{'#' * level} {line_text}")
+                    if level > 6:
+                        elements.append(f"**{line_text}**")
+                    else:
+                        level = max(level, 1)
+                        elements.append(f"{'#' * level} {line_text}")
                 else:
                     current_paragraph_lines.append(line_text)
 
@@ -266,17 +269,25 @@ def is_valid_heading_candidate(text: str) -> bool:
     return True
 
 
+def is_span_bold(span: dict) -> bool:
+    """Checks whether a font span is bold via flags or font weight names."""
+    sflags = int(span.get("flags", 0))
+    sfont = str(span.get("font", "")).lower()
+    return (sflags & 16 != 0) or any(b in sfont for b in ("bold", "black", "heavy", "medium", "semibold"))
+
+
 def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_text: str) -> Optional[float]:
     """
-    Scans the PDF page around bbox specifically for spans that contain words of `heading_text`.
-    Eliminates decorative letters (e.g. drop-cap 'C') or large standalone numbers (e.g. '3', '60 pt')
-    that happen to share the bounding box.
+    Scans the PDF page around bbox specifically for spans that contain the candidate heading text.
+    - If the spans are bold, captures all bold font sizes and returns the maximum bold size
+      (preventing small-caps letters, e.g. 8.04 pt, from dragging down a 9.96/10 pt heading).
+    - Otherwise returns the dominant font size.
     """
     if not bbox or len(bbox) != 4:
         return None
 
-    # Tokenize heading into lowercase alpha-numeric words with length >= 2
-    heading_words = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]{2,}', heading_text))
+    # Tokenize heading text into alphanumeric words (allow single letters and digits)
+    heading_words = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]+', heading_text))
     if not heading_words:
         return None
 
@@ -293,6 +304,7 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
 
     text_dict = page.get_text("dict", clip=rect)
     size_counts = Counter()
+    bold_sizes = set()
 
     for block in text_dict.get("blocks", []):
         for line in block.get("lines", []):
@@ -302,19 +314,17 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
                 if not span_text or span_size <= 0:
                     continue
 
-                # Tokenize span into words
-                span_words = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]{2,}', span_text))
-
-                # ONLY count font sizes of spans that match heading words
+                span_words = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]+', span_text))
                 matching_words = span_words & heading_words
-                if matching_words:
-                    # Weight by number of matched characters
-                    match_len = sum(len(w) for w in matching_words)
+                if matching_words or len(span_text) > 0:
+                    match_len = sum(len(w) for w in matching_words) if matching_words else 1
                     size_counts[span_size] += match_len
+                    if is_span_bold(span):
+                        bold_sizes.add(span_size)
 
     if not size_counts:
-        # Fallback: if clip did not capture due to slight bbox discrepancy, search page for first 3 heading words
-        sample_words = [w for w in re.findall(r'[a-zA-Z]{3,}', heading_text)][:3]
+        # Fallback: search page for words in heading
+        sample_words = [w for w in re.findall(r'[a-zA-Z0-9]{2,}', heading_text)][:3]
         if sample_words:
             query = " ".join(sample_words)
             hits = page.search_for(query)
@@ -326,25 +336,14 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
                             s_size = round(float(span.get("size", 0)), 1)
                             if s_size > 0:
                                 size_counts[s_size] += len(span.get("text", ""))
+                                if is_span_bold(span):
+                                    bold_sizes.add(s_size)
 
-    if not size_counts:
+    if not size_counts and not bold_sizes:
         return None
 
-    # Check for bold spans (and small-caps title spans)
-    bold_sizes = set()
-    for block in text_dict.get("blocks", []):
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
-                stext = span.get("text", "").strip()
-                ssize = round(float(span.get("size", 0)), 1)
-                sfont = str(span.get("font", "")).lower()
-                sflags = int(span.get("flags", 0))
-                swords = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]{2,}', stext))
-                if swords & heading_words:
-                    if (sflags & 16 != 0) or any(b in sfont for b in ("bold", "black", "heavy", "medium", "semibold")):
-                        bold_sizes.add(ssize)
-
-    # For bold / small-caps headings, use the maximum bold font size so small-caps letters do not drag it down
+    # If any spans forming this heading are bold, use the maximum bold font size
+    # so small-caps lowercase equivalents do not downgrade the heading hierarchy level
     if bold_sizes:
         return max(bold_sizes)
 
@@ -415,9 +414,8 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
     """
     Step 1: Iterate through candidate heading blocks.
     - Filters out plain numbers and short noise (< 3 letters).
-    - Detects document's base body font size dynamically.
-    - Discards any candidate font size <= base_body_size + 0.5 (filters out body text, footnotes, chart noise).
-    - Scans the PDF area for the PARTICULAR heading text words only.
+    - Scans the PDF area for heading text and bold font sizes.
+    - Captures candidate font sizes without discarding based on body font size.
     - Sorts unique dominant font sizes descending: largest -> Level 1 (#), next -> Level 2 (##), etc.
     """
     candidate_sizes: Set[float] = set()
@@ -429,11 +427,6 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
         return {}
 
     try:
-        base_body_size = detect_base_body_font_size(doc)
-        # Genuine headings must be strictly larger than body text (noise threshold)
-        noise_threshold = round(base_body_size + 0.8, 1)
-        print(f"[CustomMarkdown] Base body font size detected: {base_body_size} pt (Heading threshold > {noise_threshold} pt)")
-
         for page_elem in middle_json.pages:
             page_idx = page_elem.page_idx
             if page_idx < 0 or page_idx >= len(doc):
@@ -450,16 +443,14 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
                     bbox = getattr(block, "bbox", None)
                     if bbox:
                         dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text)
-                        # All bold titles or titles with sizes close to or above base font are genuine headings
-                        if dom_size is not None and dom_size >= round(base_body_size - 1.0, 1):
+                        if dom_size is not None:
                             candidate_sizes.add(dom_size)
                 elif is_visual_block(block):
                     bbox = getattr(block, "bbox", None)
                     if bbox:
                         visual_heading_sizes = scan_visual_block_heading_sizes(pdf_page, bbox)
                         for vs in visual_heading_sizes:
-                            if vs > noise_threshold:
-                                candidate_sizes.add(vs)
+                            candidate_sizes.add(vs)
     finally:
         doc.close()
 
@@ -482,8 +473,10 @@ def _render_custom_title(
     emitted_anchors: Optional[set] = None,
 ) -> str:
     """
-    Renders a title block with the heading level determined by its dominant font size.
-    If the block is a plain number or < 3 letters, renders it as standard text without '#'.
+    Renders a title block with the heading level determined by its font size.
+    - If the block is a plain number or < 3 letters, renders it as standard text without '#'.
+    - If level <= 6, renders as '# Title' (up to ######).
+    - If level > 6, renders as bold text '**Title**'.
     """
     raw_text = extract_raw_text(block)
 
@@ -500,16 +493,23 @@ def _render_custom_title(
             dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text)
             if dom_size in font_level_map:
                 level = font_level_map[dom_size]
+            elif dom_size is not None:
+                # Snap to closest known font size level
+                closest_size = min(font_level_map.keys(), key=lambda s: abs(s - dom_size))
+                level = font_level_map[closest_size]
 
-    # If font size is below noise threshold and not in genuine heading map,
-    # render it as regular body text rather than forcing it as a heading
     if level is None:
-        content_text = render_title_inline_content(block, delimiters)
-        return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
+        # Default to max available level or Level 6
+        level = max(font_level_map.values()) if font_level_map else 6
 
-    level = max(level, 1)
-    title_text = render_title_inline_content(block, delimiters)
-    title = f"{'#' * level} {title_text}"
+    title_text = render_title_inline_content(block, delimiters).strip()
+
+    # If beyond level 6, render as bold **title**
+    if level > 6:
+        title = f"**{title_text}**"
+    else:
+        level = max(level, 1)
+        title = f"{'#' * level} {title_text}"
 
     anchor = _claim_markdown_anchor(visible_block_anchor(block), emitted_anchors)
     if not anchor:
@@ -730,7 +730,10 @@ def normalize_heading_skipped_levels(markdown_text: str) -> str:
 
             new_level = max(new_level, 1)
             heading_stack.append({"orig": orig_level, "new": new_level})
-            output_lines.append(f"{'#' * new_level} {title}\n")
+            if new_level > 6:
+                output_lines.append(f"**{title}**\n")
+            else:
+                output_lines.append(f"{'#' * new_level} {title}\n")
         else:
             output_lines.append(line)
 

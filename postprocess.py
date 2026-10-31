@@ -180,6 +180,10 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
                         tokens[t_idx]['line'] = ('#' * tokens[t_idx]['level']) + ' ' + tokens[t_idx]['title'] + chr(10)
                         adjustment_count += 1
 
+    for t in tokens:
+        if t['type'] == 'heading' and t.get('level', 0) > 6:
+            t['line'] = f"**{t['title']}**\n"
+
     result = ''.join(t['line'] for t in tokens)
     return result, adjustment_count
 
