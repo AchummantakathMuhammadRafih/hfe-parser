@@ -145,6 +145,61 @@ class TestHeadingHierarchyCascade(unittest.TestCase):
         self.assertEqual(cleaned, md)
         self.assertEqual(count, 0)
 
+    def test_clause_4_sibling_synchronization(self):
+        """
+        Tests the real-world Clause 4 issue:
+        #### 4 * Principles
+        ##### 4.1 General requirements
+        ###### 4.1.1 * USABILITY ENGINEERING PROCESS
+        followed by body text, and then:
+        ##### 4.1.2 RESIDUAL RISK
+        ##### 4.1.3 Information for SAFETY
+        ##### 4.2 * USABILITY ENGINEERING FILE
+        The siblings 4.1.2 and 4.1.3 MUST synchronize to match 4.1.1 (######),
+        while 4.2 remains a sibling of 4.1 (#####).
+        """
+        md = (
+            "#### 4 * Principles\n"
+            "##### 4.1 General requirements\n"
+            "###### 4.1.1 * USABILITY ENGINEERING PROCESS\n"
+            "\n"
+            "The MANUFACTURER shall establish...\n"
+            "\n"
+            "##### 4.1.2 RESIDUAL RISK\n"
+            "\n"
+            "If the USABILITY ENGINEERING...\n"
+            "\n"
+            "##### 4.1.3 Information for SAFETY\n"
+            "\n"
+            "If information for SAFETY...\n"
+            "\n"
+            "##### 4.2 * USABILITY ENGINEERING FILE\n"
+            "\n"
+            "The results...\n"
+        )
+        cleaned, count = clean_markdown_heading_hierarchy(md)
+        expected = (
+            "#### 4 * Principles\n"
+            "##### 4.1 General requirements\n"
+            "###### 4.1.1 * USABILITY ENGINEERING PROCESS\n"
+            "\n"
+            "The MANUFACTURER shall establish...\n"
+            "\n"
+            "###### 4.1.2 RESIDUAL RISK\n"
+            "\n"
+            "If the USABILITY ENGINEERING...\n"
+            "\n"
+            "###### 4.1.3 Information for SAFETY\n"
+            "\n"
+            "If information for SAFETY...\n"
+            "\n"
+            "##### 4.2 * USABILITY ENGINEERING FILE\n"
+            "\n"
+            "The results...\n"
+        )
+        self.assertEqual(cleaned, expected)
+        self.assertGreater(count, 0)
+
 if __name__ == '__main__':
     unittest.main()
 

@@ -93,19 +93,37 @@ def filter_document_noise_lines(content: str) -> Tuple[str, int]:
     result = re.sub(r'\n{3,}', '\n\n', result)
     return result, removed_count
 
+SECTION_PREFIX_REGEX = re.compile(r'^([0-9]+(?:\.[0-9]+)*|[A-Z](?:\.[0-9]+)+)')
+
+def get_heading_number_depth(title: str) -> Optional[int]:
+    """
+    Returns the numeric hierarchy depth if the heading has a section number:
+      '4 * Principles' -> 1
+      '4.1 General requirements' -> 2
+      '4.1.1 USABILITY PROCESS' -> 3
+      'A.1 Scope' -> 2
+    Returns None if unnumbered.
+    """
+    cleaned = re.sub(r'[*_`]+', '', title).strip()
+    m = SECTION_PREFIX_REGEX.match(cleaned)
+    if m:
+        parts = m.group(1).split('.')
+        return len(parts)
+    return None
+
 def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
     """
     Scans the document for consecutive headings without intervening body text.
     Corrects inverted and equal-level consecutive headings in a foolproof manner:
       1. Identifies consecutive heading clusters (no intervening text/code, only optional blanks).
-      2. Inverts / corrects parent-child ordering if an earlier heading in the cluster has a deeper
-         level than a subsequent heading.
-      3. For consecutive headings, enforces strict nesting (each subsequent consecutive heading
-         must be deeper than its parent: next_level >= curr_level + 1).
-      4. Fully cascades the level adjustment across the entire subtree (spanning across intervening
-         body text) up to the next heading of equal or higher original level (the block boundary),
-         ensuring no child sections or deeper subheadings are ever orphaned or rendered corrupt.
-      5. Gracefully clamps any heading with level > 6 to bold markdown (**Title**).
+      2. If not in perfect hierarchy, finds the largest level (min hashes) and adjusts headers
+         step-by-step.
+      3. For the last heading in the cluster, finds its block scope (till next sibling/parent of same level).
+      4. Whatever delta (+ or -) the last heading experiences is strictly cascaded to all children
+         and nested children in that block.
+      5. Enforces sibling consistency: headings sharing the same section depth (e.g. 4.1.1 and 4.1.2)
+         under the same parent always match the same level.
+      6. Gracefully clamps any heading with level > 6 to bold markdown (**Title**).
     """
     lines = content.splitlines(keepends=True)
     if not lines:
@@ -132,7 +150,16 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
 
         m = HEADING_REGEX.match(stripped)
         if m:
-            tokens.append({'type': 'heading', 'level': len(m.group(1)), 'title': m.group(2).strip(), 'line': line})
+            title = m.group(2).strip()
+            num_depth = get_heading_number_depth(title)
+            tokens.append({
+                'type': 'heading',
+                'level': len(m.group(1)),
+                'orig_level': len(m.group(1)),
+                'title': title,
+                'num_depth': num_depth,
+                'line': line
+            })
         else:
             tokens.append({'type': 'text', 'line': line})
 
@@ -154,23 +181,22 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
             curr_group = [k]
     groups.append(curr_group)
 
-    # Helper: Find the scope/subtree boundary in h_indices.
-    # The subtree of h_indices[h_list_idx] spans until the next heading whose level <= parent_level.
-    def get_subtree_end(h_list_idx: int) -> int:
-        parent_lvl = tokens[h_indices[h_list_idx]]['level']
+    # Helper: Find the scope/block boundary in h_indices based on reference level
+    def get_subtree_end(h_list_idx: int, ref_level: int) -> int:
         for k in range(h_list_idx + 1, len(h_indices)):
-            if tokens[h_indices[k]]['level'] <= parent_lvl:
+            if tokens[h_indices[k]]['level'] <= ref_level:
                 return k
         return len(h_indices)
 
+    # Process each consecutive group
     for grp in groups:
         if len(grp) <= 1:
             continue
 
-        # Step 1: Inverted hierarchy correction within the consecutive cluster
-        # If an earlier heading in the cluster is deeper than a following heading
-        # (e.g. ### Title followed immediately by ## Subtitle),
-        # pull the earlier heading up to match the following heading's level.
+        last_k = grp[-1]
+        orig_last_level = tokens[h_indices[last_k]]['level']
+
+        # Step 1: Inverted hierarchy correction
         changed = True
         while changed:
             changed = False
@@ -179,34 +205,57 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
                 idx_next = h_indices[grp[pos + 1]]
                 if tokens[idx_curr]['level'] > tokens[idx_next]['level']:
                     tokens[idx_curr]['level'] = tokens[idx_next]['level']
-                    tokens[idx_curr]['line'] = ('#' * tokens[idx_curr]['level']) + ' ' + tokens[idx_curr]['title'] + chr(10)
                     adjustment_count += 1
                     changed = True
 
-        # Step 2: Strict parent-child nesting with foolproof subtree cascade
-        # If next_lvl <= curr_lvl, next must be nested deeper: target = curr_lvl + 1
-        # The delta must cascade through the entire subtree belonging to next.
+        # Step 2: Ensure strict stepwise nesting inside cluster (H_{pos+1} >= H_{pos} + 1)
         for pos in range(len(grp) - 1):
             idx_curr = h_indices[grp[pos]]
             idx_next = h_indices[grp[pos + 1]]
-            curr_lvl = tokens[idx_curr]['level']
-            next_lvl = tokens[idx_next]['level']
+            if tokens[idx_next]['level'] <= tokens[idx_curr]['level']:
+                tokens[idx_next]['level'] = tokens[idx_curr]['level'] + 1
+                adjustment_count += 1
 
-            if next_lvl <= curr_lvl:
-                target_lvl = curr_lvl + 1
-                delta = target_lvl - next_lvl
-                if delta > 0:
-                    sub_end = get_subtree_end(grp[pos + 1])
-                    for k in range(grp[pos + 1], sub_end):
-                        t_idx = h_indices[k]
-                        tokens[t_idx]['level'] += delta
-                        tokens[t_idx]['line'] = ('#' * tokens[t_idx]['level']) + ' ' + tokens[t_idx]['title'] + chr(10)
+        # Check the delta on the last heading of the group
+        new_last_level = tokens[h_indices[last_k]]['level']
+        delta_last = new_last_level - orig_last_level
+
+        # Find block scope: from orig_last_level till next sibling/parent of same original level
+        block_end = get_subtree_end(last_k, orig_last_level)
+
+        # Step 3: Cascade delta to all children/grandchildren in the block after the group
+        if delta_last != 0:
+            for k in range(last_k + 1, block_end):
+                t_idx = h_indices[k]
+                tokens[t_idx]['level'] += delta_last
+                adjustment_count += 1
+
+        # Step 4: Sibling Numbering Synchronization within the block
+        # If the last heading (or any heading in cluster) has a num_depth, ensure subsequent
+        # siblings in the block with the same num_depth match that level!
+        # Scope for siblings of the cluster extends up to the next sibling of the cluster's root parent.
+        first_k = grp[0]
+        cluster_root_level = tokens[h_indices[first_k]]['level']
+        cluster_block_end = get_subtree_end(first_k, cluster_root_level)
+        for k_in_grp in grp:
+            grp_t = tokens[h_indices[k_in_grp]]
+            d = grp_t.get('num_depth')
+            if d is not None:
+                target_level = grp_t['level']
+                for k in range(last_k + 1, cluster_block_end):
+                    child_t = tokens[h_indices[k]]
+                    if child_t.get('num_depth') == d and child_t['level'] != target_level:
+                        child_t['level'] = target_level
                         adjustment_count += 1
 
-    # Step 3: Handle headings deeper than level 6 (Markdown standard max is ######)
+    # Reconstruct lines and clamp level > 6 to bold markdown
     for t in tokens:
-        if t['type'] == 'heading' and t.get('level', 0) > 6:
-            t['line'] = f"**{t['title']}**\n"
+        if t['type'] == 'heading':
+            lvl = t['level']
+            if lvl > 6:
+                t['line'] = f"**{t['title']}**\n"
+            else:
+                t['line'] = ('#' * lvl) + ' ' + t['title'] + chr(10)
 
     result = ''.join(t['line'] for t in tokens)
     return result, adjustment_count
