@@ -94,6 +94,19 @@ def filter_document_noise_lines(content: str) -> Tuple[str, int]:
     return result, removed_count
 
 def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
+    """
+    Scans the document for consecutive headings without intervening body text.
+    Corrects inverted and equal-level consecutive headings in a foolproof manner:
+      1. Identifies consecutive heading clusters (no intervening text/code, only optional blanks).
+      2. Inverts / corrects parent-child ordering if an earlier heading in the cluster has a deeper
+         level than a subsequent heading.
+      3. For consecutive headings, enforces strict nesting (each subsequent consecutive heading
+         must be deeper than its parent: next_level >= curr_level + 1).
+      4. Fully cascades the level adjustment across the entire subtree (spanning across intervening
+         body text) up to the next heading of equal or higher original level (the block boundary),
+         ensuring no child sections or deeper subheadings are ever orphaned or rendered corrupt.
+      5. Gracefully clamps any heading with level > 6 to bold markdown (**Title**).
+    """
     lines = content.splitlines(keepends=True)
     if not lines:
         return content, 0
@@ -127,6 +140,7 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
     if not h_indices:
         return content, 0
 
+    # Group headings where there is NO intervening text or code (only blanks)
     groups = []
     curr_group = [0]
     for k in range(1, len(h_indices)):
@@ -140,6 +154,8 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
             curr_group = [k]
     groups.append(curr_group)
 
+    # Helper: Find the scope/subtree boundary in h_indices.
+    # The subtree of h_indices[h_list_idx] spans until the next heading whose level <= parent_level.
     def get_subtree_end(h_list_idx: int) -> int:
         parent_lvl = tokens[h_indices[h_list_idx]]['level']
         for k in range(h_list_idx + 1, len(h_indices)):
@@ -151,6 +167,10 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
         if len(grp) <= 1:
             continue
 
+        # Step 1: Inverted hierarchy correction within the consecutive cluster
+        # If an earlier heading in the cluster is deeper than a following heading
+        # (e.g. ### Title followed immediately by ## Subtitle),
+        # pull the earlier heading up to match the following heading's level.
         changed = True
         while changed:
             changed = False
@@ -163,6 +183,9 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
                     adjustment_count += 1
                     changed = True
 
+        # Step 2: Strict parent-child nesting with foolproof subtree cascade
+        # If next_lvl <= curr_lvl, next must be nested deeper: target = curr_lvl + 1
+        # The delta must cascade through the entire subtree belonging to next.
         for pos in range(len(grp) - 1):
             idx_curr = h_indices[grp[pos]]
             idx_next = h_indices[grp[pos + 1]]
@@ -180,6 +203,7 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
                         tokens[t_idx]['line'] = ('#' * tokens[t_idx]['level']) + ' ' + tokens[t_idx]['title'] + chr(10)
                         adjustment_count += 1
 
+    # Step 3: Handle headings deeper than level 6 (Markdown standard max is ######)
     for t in tokens:
         if t['type'] == 'heading' and t.get('level', 0) > 6:
             t['line'] = f"**{t['title']}**\n"
