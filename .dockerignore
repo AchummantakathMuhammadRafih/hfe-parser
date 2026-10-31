@@ -1,0 +1,17 @@
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+tasks.db
+tasks.db-wal
+tasks.db-shm
+data/
+*.log
+*.zip
+.git
+.gitignore
+.env
+

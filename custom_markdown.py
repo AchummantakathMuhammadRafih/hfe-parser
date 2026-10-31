@@ -209,7 +209,7 @@ def extract_superimposed_elements_from_pdf(
                         current_paragraph_lines = []
 
                     level = font_level_map[dom_size]
-                    level = min(max(level, 1), 6)
+                    level = max(level, 1)
                     elements.append(f"{'#' * level} {line_text}")
                 else:
                     current_paragraph_lines.append(line_text)
@@ -330,6 +330,24 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
     if not size_counts:
         return None
 
+    # Check for bold spans (and small-caps title spans)
+    bold_sizes = set()
+    for block in text_dict.get("blocks", []):
+        for line in block.get("lines", []):
+            for span in line.get("spans", []):
+                stext = span.get("text", "").strip()
+                ssize = round(float(span.get("size", 0)), 1)
+                sfont = str(span.get("font", "")).lower()
+                sflags = int(span.get("flags", 0))
+                swords = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]{2,}', stext))
+                if swords & heading_words:
+                    if (sflags & 16 != 0) or any(b in sfont for b in ("bold", "black", "heavy", "medium", "semibold")):
+                        bold_sizes.add(ssize)
+
+    # For bold / small-caps headings, use the maximum bold font size so small-caps letters do not drag it down
+    if bold_sizes:
+        return max(bold_sizes)
+
     dominant_size, _ = size_counts.most_common(1)[0]
     return dominant_size
 
@@ -432,7 +450,8 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
                     bbox = getattr(block, "bbox", None)
                     if bbox:
                         dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text)
-                        if dom_size is not None and dom_size > noise_threshold:
+                        # All bold titles or titles with sizes close to or above base font are genuine headings
+                        if dom_size is not None and dom_size >= round(base_body_size - 1.0, 1):
                             candidate_sizes.add(dom_size)
                 elif is_visual_block(block):
                     bbox = getattr(block, "bbox", None)
@@ -448,7 +467,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
     sorted_sizes = sorted(candidate_sizes, reverse=True)
     font_level_map: Dict[float, int] = {}
     for idx, size in enumerate(sorted_sizes):
-        font_level_map[size] = min(idx + 1, 6)
+        font_level_map[size] = idx + 1
 
     print(f"[CustomMarkdown] Filtered genuine heading font sizes: {sorted_sizes} -> Level Map: {font_level_map}")
     return font_level_map
@@ -488,7 +507,7 @@ def _render_custom_title(
         content_text = render_title_inline_content(block, delimiters)
         return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
 
-    level = min(max(level, 1), 6)
+    level = max(level, 1)
     title_text = render_title_inline_content(block, delimiters)
     title = f"{'#' * level} {title_text}"
 
@@ -673,7 +692,7 @@ def normalize_heading_skipped_levels(markdown_text: str) -> str:
 
     Preserves code fences (``` or ~~~).
     """
-    heading_pattern = re.compile(r'^(#{1,6})\s+(.+)$')
+    heading_pattern = re.compile(r'^(#{1,})\s+(.+)$')
     lines = markdown_text.splitlines(keepends=True)
     output_lines = []
     in_code_block = False
@@ -709,7 +728,7 @@ def normalize_heading_skipped_levels(markdown_text: str) -> str:
                 parent_new = heading_stack[-1]["new"]
                 new_level = parent_new + 1
 
-            new_level = min(max(new_level, 1), 6)
+            new_level = max(new_level, 1)
             heading_stack.append({"orig": orig_level, "new": new_level})
             output_lines.append(f"{'#' * new_level} {title}\n")
         else:

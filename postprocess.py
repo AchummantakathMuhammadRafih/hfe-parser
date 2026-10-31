@@ -4,7 +4,7 @@ import zipfile
 from typing import List, Tuple, Optional
 
 # Match ATX headings: 1 to 6 '#' followed by whitespace and title text
-HEADING_REGEX = re.compile(r'^(#{1,6})\s+(.+)$')
+HEADING_REGEX = re.compile(r'^(#{1,})\s+(.+)$')
 
 def is_fenced_code_boundary(line: str) -> bool:
     stripped = line.strip()
@@ -94,89 +94,95 @@ def filter_document_noise_lines(content: str) -> Tuple[str, int]:
     return result, removed_count
 
 def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
-    """
-    Cleans consecutive markdown headings that have no body paragraph between them.
-
-    Rules:
-      - Case 1: L1 == L2 (e.g. ## H1 followed by ## H2 without text)
-        -> Merged as: ## H1 H2
-      - Case 2: L1 > L2 (e.g. ### H1 followed by ## H2 without text)
-        -> Merged as: ## H1 H2 (takes min(L1, L2), the higher hierarchy level)
-      - Case 3: L1 < L2 (e.g. ## H1 followed by ### H2 without text)
-        -> Kept as-is (valid parent-child hierarchy)
-      - Content inside code blocks (```) is never touched.
-
-    Returns:
-      (cleaned_content, merge_count)
-    """
     lines = content.splitlines(keepends=True)
     if not lines:
         return content, 0
 
-    merged_count = 0
+    adjustment_count = 0
     in_code_block = False
 
-    # First pass: identify tokens (code_line, blank_line, heading, text_line)
-    # Each item: dict(type="heading"|"blank"|"text"|"code", line=..., level=..., text=...)
     tokens = []
     for line in lines:
         stripped = line.strip()
         if is_fenced_code_boundary(line):
             in_code_block = not in_code_block
-            tokens.append({"type": "code", "line": line})
+            tokens.append({'type': 'code', 'line': line})
             continue
 
         if in_code_block:
-            tokens.append({"type": "code", "line": line})
+            tokens.append({'type': 'code', 'line': line})
             continue
 
         if not stripped:
-            tokens.append({"type": "blank", "line": line})
+            tokens.append({'type': 'blank', 'line': line})
             continue
 
         m = HEADING_REGEX.match(stripped)
         if m:
-            level = len(m.group(1))
-            title = m.group(2).strip()
-            tokens.append({"type": "heading", "level": level, "title": title, "line": line})
+            tokens.append({'type': 'heading', 'level': len(m.group(1)), 'title': m.group(2).strip(), 'line': line})
         else:
-            tokens.append({"type": "text", "line": line})
+            tokens.append({'type': 'text', 'line': line})
 
-    # Second pass: scan for consecutive headings
-    # If heading1 is followed only by blanks and then heading2:
-    #   if L1 >= L2: merge heading2 into heading1 with min(L1, L2)
-    i = 0
-    while i < len(tokens):
-        if tokens[i]["type"] == "heading":
-            # Look ahead past any blanks
-            j = i + 1
-            while j < len(tokens) and tokens[j]["type"] == "blank":
-                j += 1
+    h_indices = [idx for idx, t in enumerate(tokens) if t['type'] == 'heading']
+    if not h_indices:
+        return content, 0
 
-            if j < len(tokens) and tokens[j]["type"] == "heading":
-                l1 = tokens[i]["level"]
-                l2 = tokens[j]["level"]
+    groups = []
+    curr_group = [0]
+    for k in range(1, len(h_indices)):
+        prev_idx = h_indices[k - 1]
+        this_idx = h_indices[k]
+        only_blanks = all(tokens[x]['type'] == 'blank' for x in range(prev_idx + 1, this_idx))
+        if only_blanks:
+            curr_group.append(k)
+        else:
+            groups.append(curr_group)
+            curr_group = [k]
+    groups.append(curr_group)
 
-                # Case 1 (L1 == L2) or Case 2 (L1 > L2)
-                if l1 >= l2:
-                    target_level = min(l1, l2)
-                    new_title = f"{tokens[i]['title']} {tokens[j]['title']}"
-                    hashes = "#" * target_level
-                    tokens[i]["level"] = target_level
-                    tokens[i]["title"] = new_title
-                    tokens[i]["line"] = f"{hashes} {new_title}\n"
+    def get_subtree_end(h_list_idx: int) -> int:
+        parent_lvl = tokens[h_indices[h_list_idx]]['level']
+        for k in range(h_list_idx + 1, len(h_indices)):
+            if tokens[h_indices[k]]['level'] <= parent_lvl:
+                return k
+        return len(h_indices)
 
-                    # Remove intermediate blanks and heading2
-                    del tokens[i + 1 : j + 1]
-                    merged_count += 1
-                    # Do not advance i, in case a 3rd consecutive heading follows
-                    continue
+    for grp in groups:
+        if len(grp) <= 1:
+            continue
 
-        i += 1
+        changed = True
+        while changed:
+            changed = False
+            for pos in range(len(grp) - 1):
+                idx_curr = h_indices[grp[pos]]
+                idx_next = h_indices[grp[pos + 1]]
+                if tokens[idx_curr]['level'] > tokens[idx_next]['level']:
+                    tokens[idx_curr]['level'] = tokens[idx_next]['level']
+                    tokens[idx_curr]['line'] = ('#' * tokens[idx_curr]['level']) + ' ' + tokens[idx_curr]['title'] + chr(10)
+                    adjustment_count += 1
+                    changed = True
 
-    # Reconstruct document
-    result = "".join(t["line"] for t in tokens)
-    return result, merged_count
+        for pos in range(len(grp) - 1):
+            idx_curr = h_indices[grp[pos]]
+            idx_next = h_indices[grp[pos + 1]]
+            curr_lvl = tokens[idx_curr]['level']
+            next_lvl = tokens[idx_next]['level']
+
+            if next_lvl <= curr_lvl:
+                target_lvl = curr_lvl + 1
+                delta = target_lvl - next_lvl
+                if delta > 0:
+                    sub_end = get_subtree_end(grp[pos + 1])
+                    for k in range(grp[pos + 1], sub_end):
+                        t_idx = h_indices[k]
+                        tokens[t_idx]['level'] += delta
+                        tokens[t_idx]['line'] = ('#' * tokens[t_idx]['level']) + ' ' + tokens[t_idx]['title'] + chr(10)
+                        adjustment_count += 1
+
+    result = ''.join(t['line'] for t in tokens)
+    return result, adjustment_count
+
 
 
 # Regex patterns for markdown images and HTML images

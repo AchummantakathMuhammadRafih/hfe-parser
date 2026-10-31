@@ -1,0 +1,19 @@
+services:
+  hfe-parser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hfe-parser
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - tasks-data:/app/tasks_storage
+    environment:
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+    restart: unless-stopped
+
+volumes:
+  tasks-data:
+
