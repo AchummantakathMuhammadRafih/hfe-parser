@@ -364,6 +364,64 @@ def is_title_block(block: Any) -> bool:
     return False
 
 
+def is_heading_text_block(
+    block: Any,
+    pdf_page: Optional[fitz.Page],
+    font_level_map: Dict[float, int],
+    base_body_font_size: float = 10.0,
+) -> bool:
+    """
+    Checks if a TextBlock is actually an inferred heading:
+    1. Must satisfy candidate criteria (>= 3 letters, not pure numbers).
+    2. Must be relatively concise (single heading line, not a long paragraph).
+    3. In the PDF, its text must be bold and/or its dominant font size must be
+       greater than the base body font size or present in font_level_map.
+    """
+    if not isinstance(block, TextBlock):
+        return False
+
+    raw_text = extract_raw_text(block).strip()
+    if not is_valid_heading_candidate(raw_text):
+        return False
+
+    # Headings are concise titles (e.g. fewer than 200 chars or <= 20 words, no multiple paragraphs)
+    if len(raw_text) > 200 or len(raw_text.split()) > 25 or '\n\n' in raw_text:
+        return False
+
+    if not pdf_page or not font_level_map:
+        return False
+
+    bbox = getattr(block, "bbox", None)
+    if not bbox or len(bbox) != 4:
+        return False
+
+    try:
+        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text)
+        if dom_size is None:
+            return False
+
+        # Check if the block has bold text in PDF
+        clip_rect = fitz.Rect(bbox)
+        text_dict = pdf_page.get_text("dict", clip=clip_rect)
+        has_bold = False
+        for b in text_dict.get("blocks", []):
+            for l in b.get("lines", []):
+                for s in l.get("spans", []):
+                    if is_span_bold(s):
+                        has_bold = True
+                        break
+
+        # If it matches a known heading font size, or is bold and larger than base body font size:
+        if dom_size in font_level_map:
+            return True
+        if has_bold and dom_size >= base_body_font_size:
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
 def is_skipped_aux_block(block: Any) -> bool:
     """Checks if a block is a header, footer, page number, or aside text to skip."""
     if isinstance(block, PageAuxTextBlock):
@@ -434,7 +492,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
 
             pdf_page = doc[page_idx]
             for block in page_elem.blocks:
-                if is_title_block(block):
+                if is_title_block(block) or (isinstance(block, TextBlock) and is_heading_text_block(block, pdf_page, candidate_sizes)):
                     raw_text = extract_raw_text(block)
                     if not is_valid_heading_candidate(raw_text):
                         # Skip plain numbers (e.g. 27, 35) or noise (< 3 letters)
@@ -592,7 +650,14 @@ def render_custom_markdown(
                     continue
 
                 # Custom Title rendering with targeted font-size level mapping
-                if is_title_block(block):
+                is_inferred_heading = (
+                    isinstance(block, TextBlock)
+                    and pdf_doc
+                    and 0 <= planned.page_idx < len(pdf_doc)
+                    and is_heading_text_block(block, pdf_doc[planned.page_idx], font_level_map)
+                )
+
+                if is_title_block(block) or is_inferred_heading:
                     rendered = _render_custom_title(
                         block,
                         delimiters,
