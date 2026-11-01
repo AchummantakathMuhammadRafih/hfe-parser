@@ -181,72 +181,71 @@ def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
             curr_group = [k]
     groups.append(curr_group)
 
-    # Helper: Find the scope/block boundary in h_indices based on reference level
-    def get_subtree_end(h_list_idx: int, ref_level: int) -> int:
-        for k in range(h_list_idx + 1, len(h_indices)):
-            if tokens[h_indices[k]]['level'] <= ref_level:
-                return k
-        return len(h_indices)
-
     # Process each consecutive group
     for grp in groups:
         if len(grp) <= 1:
             continue
 
+        levels = [tokens[h_indices[k]]['level'] for k in grp]
+        is_in_order = all(levels[i + 1] == levels[i] + 1 for i in range(len(levels) - 1))
+
+        # STEP 3: Highest in group (minimum number of hashes)
+        highest_grp_level = min(levels)
+
+        # STEP 4: Block determination
+        # The block starts after the group and continues until the next heading
+        # that has the same or higher level as the group's highest (level <= highest_grp_level).
+        # Exception: If headings have numeric depth (e.g. 5.3 has depth 2, while 5.3.2 has depth 3),
+        # sub-headings deeper than the group's top heading belong INSIDE the block and do not terminate it!
         last_k = grp[-1]
+        top_k = grp[0]
+        top_depth = tokens[h_indices[top_k]].get('num_depth')
+
+        block_end = len(h_indices)
+        for k in range(last_k + 1, len(h_indices)):
+            cand_token = tokens[h_indices[k]]
+            cand_depth = cand_token.get('num_depth')
+            if top_depth is not None and cand_depth is not None and cand_depth > top_depth:
+                # Still a deeper child inside the top heading's subtree (e.g., 5.3.2 under 5.3)
+                continue
+            if cand_token['level'] <= highest_grp_level:
+                block_end = k
+                break
+
+        # STEP 5: Last heading in group reference and original hashes
         orig_last_level = tokens[h_indices[last_k]]['level']
 
-        # Step 1: Inverted hierarchy correction
-        changed = True
-        while changed:
-            changed = False
-            for pos in range(len(grp) - 1):
-                idx_curr = h_indices[grp[pos]]
-                idx_next = h_indices[grp[pos + 1]]
-                if tokens[idx_curr]['level'] > tokens[idx_next]['level']:
-                    tokens[idx_curr]['level'] = tokens[idx_next]['level']
+        # STEP 6: Normalization of group headers
+        # Top heading in group gets highest_grp_level, subsequent headings step down (+1 each)
+        if not is_in_order:
+            for pos in range(len(grp)):
+                t_idx = h_indices[grp[pos]]
+                target_lvl = highest_grp_level + pos
+                if tokens[t_idx]['level'] != target_lvl:
+                    tokens[t_idx]['level'] = target_lvl
                     adjustment_count += 1
-                    changed = True
 
-        # Step 2: Ensure strict stepwise nesting inside cluster (H_{pos+1} >= H_{pos} + 1)
-        for pos in range(len(grp) - 1):
-            idx_curr = h_indices[grp[pos]]
-            idx_next = h_indices[grp[pos + 1]]
-            if tokens[idx_next]['level'] <= tokens[idx_curr]['level']:
-                tokens[idx_next]['level'] = tokens[idx_curr]['level'] + 1
-                adjustment_count += 1
-
-        # Check the delta on the last heading of the group
+        # Detect delta on the last header
         new_last_level = tokens[h_indices[last_k]]['level']
         delta_last = new_last_level - orig_last_level
+        last_depth = tokens[h_indices[last_k]].get('num_depth')
 
-        # Find block scope: from orig_last_level till next sibling/parent of same original level
-        block_end = get_subtree_end(last_k, orig_last_level)
-
-        # Step 3: Cascade delta to all children/grandchildren in the block after the group
-        if delta_last != 0:
-            for k in range(last_k + 1, block_end):
-                t_idx = h_indices[k]
+        # STEP 7: Delta cascade across the entire block
+        # Cascades delta_last to all child/nested headings in the block.
+        # Also ensures sibling consistency: any heading in the block sharing the same depth
+        # as the last heading (e.g., 5.3.2 matching 5.3.1, or 4.1.2 matching 4.1.1)
+        # aligns to the last heading's level.
+        for k in range(last_k + 1, block_end):
+            t_idx = h_indices[k]
+            cand_depth = tokens[t_idx].get('num_depth')
+            if last_depth is not None and cand_depth is not None and cand_depth == last_depth:
+                # Sibling of last_k (e.g., 5.3.2 is sibling to 5.3.1; 4.1.2 is sibling to 4.1.1)
+                if tokens[t_idx]['level'] != new_last_level:
+                    tokens[t_idx]['level'] = new_last_level
+                    adjustment_count += 1
+            elif delta_last != 0:
                 tokens[t_idx]['level'] += delta_last
                 adjustment_count += 1
-
-        # Step 4: Sibling Numbering Synchronization within the block
-        # If the last heading (or any heading in cluster) has a num_depth, ensure subsequent
-        # siblings in the block with the same num_depth match that level!
-        # Scope for siblings of the cluster extends up to the next sibling of the cluster's root parent.
-        first_k = grp[0]
-        cluster_root_level = tokens[h_indices[first_k]]['level']
-        cluster_block_end = get_subtree_end(first_k, cluster_root_level)
-        for k_in_grp in grp:
-            grp_t = tokens[h_indices[k_in_grp]]
-            d = grp_t.get('num_depth')
-            if d is not None:
-                target_level = grp_t['level']
-                for k in range(last_k + 1, cluster_block_end):
-                    child_t = tokens[h_indices[k]]
-                    if child_t.get('num_depth') == d and child_t['level'] != target_level:
-                        child_t['level'] = target_level
-                        adjustment_count += 1
 
     # Reconstruct lines and clamp level > 6 to bold markdown
     for t in tokens:

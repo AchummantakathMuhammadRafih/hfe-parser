@@ -347,8 +347,8 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
     if bold_sizes:
         return max(bold_sizes)
 
-    dominant_size, _ = size_counts.most_common(1)[0]
-    return dominant_size
+    # If NO spans in this candidate text are bold, it is not a genuine heading!
+    return None
 
 
 def is_title_block(block: Any) -> bool:
@@ -549,6 +549,11 @@ def _render_custom_title(
         bbox = getattr(block, "bbox", None)
         if bbox:
             dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text)
+            if dom_size is None:
+                # Text is NOT bold in the PDF -> Not a genuine heading! Render as normal text.
+                content_text = render_title_inline_content(block, delimiters)
+                return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
+
             if dom_size in font_level_map:
                 level = font_level_map[dom_size]
             elif dom_size is not None:
@@ -557,8 +562,10 @@ def _render_custom_title(
                 level = font_level_map[closest_size]
 
     if level is None:
-        # Default to max available level or Level 6
-        level = max(font_level_map.values()) if font_level_map else 6
+        # If we could not verify bold font size from PDF, do NOT guess or force a heading!
+        # Render as standard content text.
+        content_text = render_title_inline_content(block, delimiters)
+        return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
 
     title_text = render_title_inline_content(block, delimiters).strip()
 
