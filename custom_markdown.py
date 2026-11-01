@@ -313,14 +313,18 @@ def get_dominant_font_size_for_text(
     bbox: List[float],
     heading_text: str,
     base_body_font_size: float = 10.0,
+    allow_any_style: bool = False,
 ) -> Optional[float]:
     """
     Scans the PDF page around bbox specifically for spans that contain the candidate heading text.
-    - If any span is larger than the document's base body font size by at least 5 points
-      (span_size >= base_body_font_size + 5.0), it qualifies as a heading (e.g. large stylized/thin titles).
-    - If the font size is less than base_body_font_size + 5.0, to be a heading it must be BOLD THROUGHOUT
-      (i.e., every non-empty text span in the candidate must be bold).
-    - Otherwise returns None (not a heading, rendered as normal text).
+    - If allow_any_style is True (e.g. MinerU explicitly classified the block as a title/heading):
+      returns the dominant font size directly without requiring bold or >= base + 5.0 pt.
+    - If allow_any_style is False (used for inferring headings from regular text blocks):
+      - If any span is larger than the document's base body font size by at least 5 points
+        (span_size >= base_body_font_size + 5.0), it qualifies as a heading (e.g. large stylized/thin titles).
+      - If the font size is less than base_body_font_size + 5.0, to be a heading it must be BOLD THROUGHOUT
+        (i.e., every non-empty text span in the candidate must be bold).
+      - Otherwise returns None (not a heading, rendered as normal text).
     """
     if not bbox or len(bbox) != 4:
         return None
@@ -375,6 +379,10 @@ def get_dominant_font_size_for_text(
 
     if not spans_found:
         return None
+
+    # If allow_any_style is enabled (block classified as title by MinerU), return dominant font size directly:
+    if allow_any_style:
+        return max(sz for _, sz, _ in spans_found)
 
     # Check 1: Large font case (font size >= base + 5.0 pt)
     large_sizes = [sz for _, sz, _ in spans_found if sz >= base_body_font_size + 5.0]
@@ -521,7 +529,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
 
             pdf_page = doc[page_idx]
             for block in page_elem.blocks:
-                if is_title_block(block) or (isinstance(block, TextBlock) and is_heading_text_block(block, pdf_page, candidate_sizes, base_body_font_size=base_body_font_size)):
+                if is_title_block(block):
                     raw_text = extract_raw_text(block)
                     if not is_valid_heading_candidate(raw_text):
                         # Skip plain numbers (e.g. 27, 35) or noise (< 3 letters)
@@ -529,7 +537,19 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
 
                     bbox = getattr(block, "bbox", None)
                     if bbox:
-                        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text, base_body_font_size=base_body_font_size)
+                        # For blocks classified by MinerU as titles, extract font size without requiring bold or >= base + 5.0 pt
+                        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text, base_body_font_size=base_body_font_size, allow_any_style=True)
+                        if dom_size is not None:
+                            candidate_sizes.add(dom_size)
+                elif isinstance(block, TextBlock) and is_heading_text_block(block, pdf_page, candidate_sizes, base_body_font_size=base_body_font_size):
+                    raw_text = extract_raw_text(block)
+                    if not is_valid_heading_candidate(raw_text):
+                        # Skip plain numbers (e.g. 27, 35) or noise (< 3 letters)
+                        continue
+
+                    bbox = getattr(block, "bbox", None)
+                    if bbox:
+                        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text, base_body_font_size=base_body_font_size, allow_any_style=False)
                         if dom_size is not None:
                             candidate_sizes.add(dom_size)
                 elif is_visual_block(block):
@@ -578,9 +598,9 @@ def _render_custom_title(
     if pdf_doc and 0 <= page_idx < len(pdf_doc) and font_level_map:
         bbox = getattr(block, "bbox", None)
         if bbox:
-            dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text, base_body_font_size=base_body_font_size)
+            dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text, base_body_font_size=base_body_font_size, allow_any_style=True)
             if dom_size is None:
-                # Text is NOT bold and not >= base + 5.0 in the PDF -> Not a genuine heading! Render as normal text.
+                # Does not satisfy heading candidate constraints (e.g. > 10 non-stop words) -> render as normal text.
                 content_text = render_title_inline_content(block, delimiters)
                 return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
 
