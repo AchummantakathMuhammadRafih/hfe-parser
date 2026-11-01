@@ -286,11 +286,11 @@ def get_dominant_font_size_for_text(
     """
     Scans the PDF page around bbox specifically for spans that contain the candidate heading text.
     - If allow_any_style is True (e.g. MinerU explicitly classified the block as a title/heading):
-      returns the dominant font size directly without requiring bold or >= base + 5.0 pt.
+      returns the dominant font size directly without requiring bold or >= base + 2.0 pt.
     - If allow_any_style is False (used for inferring headings from regular text blocks):
-      - If any span is larger than the document's base body font size by at least 5 points
-        (span_size >= base_body_font_size + 5.0), it qualifies as a heading (e.g. large stylized/thin titles).
-      - If the font size is less than base_body_font_size + 5.0, to be a heading it must be BOLD THROUGHOUT
+      - If any span is larger than the document's base body font size by at least 2 points
+        (span_size >= base_body_font_size + 2.0), it qualifies as a heading (e.g. stylized/italic section headers).
+      - If the font size is less than base_body_font_size + 2.0, to be a heading it must be BOLD THROUGHOUT
         (i.e., every non-empty text span in the candidate must be bold).
       - Otherwise returns None (not a heading, rendered as normal text).
     """
@@ -348,19 +348,19 @@ def get_dominant_font_size_for_text(
     if allow_any_style:
         return max(sz for _, sz, _ in spans_found)
 
-    # Check 1: Large font case (font size >= base + 5.0 pt)
-    large_sizes = [sz for _, sz, _ in spans_found if sz >= base_body_font_size + 5.0]
+    # Check 1: Large/Stylized font case (font size >= base + 2.0 pt)
+    large_sizes = [sz for _, sz, _ in spans_found if sz >= base_body_font_size + 2.0]
     if large_sizes:
         return max(large_sizes)
 
-    # Check 2: Less than base + 5.0 pt -> MUST be bold throughout!
+    # Check 2: Less than base + 2.0 pt -> MUST be bold throughout!
     # Every text span in the candidate must be bold.
     all_bold = all(is_span_bold(span) for _, _, span in spans_found)
     if all_bold:
         # Return maximum bold font size
         return max(sz for _, sz, _ in spans_found)
 
-    # Not bold throughout and not >= base + 5.0 pt -> NOT a heading!
+    # Not bold throughout and not >= base + 2.0 pt -> NOT a heading!
     return None
 
 
