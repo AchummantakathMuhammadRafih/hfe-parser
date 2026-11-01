@@ -244,39 +244,11 @@ def extract_raw_text(block: Any) -> str:
     return ""
 
 
-STOP_WORDS = {
-    "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are",
-    "aren't", "as", "at", "be", "because", "been", "before", "being", "below", "between", "both",
-    "but", "by", "can't", "cannot", "could", "couldn't", "did", "didn't", "do", "does", "doesn't",
-    "doing", "don't", "down", "during", "each", "few", "for", "from", "further", "had", "hadn't",
-    "has", "hasn't", "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here",
-    "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd", "i'll", "i'm",
-    "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's", "me", "more",
-    "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or",
-    "other", "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shan't", "she",
-    "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such", "than", "that", "that's",
-    "the", "their", "theirs", "them", "themselves", "then", "there", "there's", "these", "they",
-    "they'd", "they'll", "they're", "they've", "this", "those", "through", "to", "too", "under",
-    "until", "up", "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were", "weren't",
-    "what", "what's", "when", "when's", "where", "where's", "which", "while", "who", "who's", "whom",
-    "why", "why's", "with", "won't", "would", "wouldn't", "you", "you'd", "you'll", "you're", "you've",
-    "your", "yours", "yourself", "yourselves"
-}
-
-
-def get_non_stop_word_count(text: str) -> int:
-    """Returns the count of words in text after removing common English stop words."""
-    words = re.findall(r'[a-zA-Z0-9]+', text.lower())
-    non_stop = [w for w in words if w not in STOP_WORDS]
-    return len(non_stop)
-
-
 def is_valid_heading_candidate(text: str) -> bool:
     """
     Validates whether a candidate heading text should be used for heading level determination:
     - Rejects plain numbers or symbols (e.g., '27', '# 35', '100', '3.1').
     - Rejects text with fewer than 3 alphabetic letters (e.g., 'C', 'II', 'A').
-    - Strict requirement: after removing stop words, the word count must be <= 10.
     """
     if not text:
         return False
@@ -292,10 +264,6 @@ def is_valid_heading_candidate(text: str) -> bool:
     # Extract all alphabetic letters
     letters = re.findall(r'[a-zA-Z]', clean)
     if len(letters) < 3:
-        return False
-
-    # Strict requirement: after removing stop words, word count <= 10
-    if get_non_stop_word_count(clean) > 10:
         return False
 
     return True
@@ -327,10 +295,6 @@ def get_dominant_font_size_for_text(
       - Otherwise returns None (not a heading, rendered as normal text).
     """
     if not bbox or len(bbox) != 4:
-        return None
-
-    # Strict requirement: after removing stop words, word count must be <= 10 for any font size
-    if get_non_stop_word_count(heading_text) > 10:
         return None
 
     # Tokenize heading text into alphanumeric words (allow single letters and digits)
