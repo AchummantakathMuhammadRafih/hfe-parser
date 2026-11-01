@@ -284,11 +284,11 @@ def get_dominant_font_size_for_text(
 ) -> Optional[float]:
     """
     Scans the PDF page around bbox specifically for spans that contain the candidate heading text.
-    - If the spans are bold, captures all bold font sizes and returns the maximum bold size
-      (preventing small-caps letters, e.g. 8.04 pt, from dragging down a 9.96/10 pt heading).
     - If any span is larger than the document's base body font size by at least 5 points
       (span_size >= base_body_font_size + 5.0), it qualifies as a heading (e.g. large stylized/thin titles).
-    - Otherwise returns None (not a heading).
+    - If the font size is less than base_body_font_size + 5.0, to be a heading it must be BOLD THROUGHOUT
+      (i.e., every non-empty text span in the candidate must be bold).
+    - Otherwise returns None (not a heading, rendered as normal text).
     """
     if not bbox or len(bbox) != 4:
         return None
@@ -310,8 +310,7 @@ def get_dominant_font_size_for_text(
     rect = rect + (-2, -2, 2, 2)
 
     text_dict = page.get_text("dict", clip=rect)
-    size_counts = Counter()
-    qualifying_sizes = set()
+    spans_found = []
 
     for block in text_dict.get("blocks", []):
         for line in block.get("lines", []):
@@ -320,16 +319,9 @@ def get_dominant_font_size_for_text(
                 span_size = round(float(span.get("size", 0)), 1)
                 if not span_text or span_size <= 0:
                     continue
+                spans_found.append((span_text, span_size, span))
 
-                span_words = set(w.lower() for w in re.findall(r'[a-zA-Z0-9]+', span_text))
-                matching_words = span_words & heading_words
-                if matching_words or len(span_text) > 0:
-                    match_len = sum(len(w) for w in matching_words) if matching_words else 1
-                    size_counts[span_size] += match_len
-                    if is_span_bold(span) or (span_size >= base_body_font_size + 5.0):
-                        qualifying_sizes.add(span_size)
-
-    if not size_counts:
+    if not spans_found:
         # Fallback: search page for words in heading
         sample_words = [w for w in re.findall(r'[a-zA-Z0-9]{2,}', heading_text)][:3]
         if sample_words:
@@ -340,20 +332,27 @@ def get_dominant_font_size_for_text(
                 for block in hit_dict.get("blocks", []):
                     for line in block.get("lines", []):
                         for span in line.get("spans", []):
-                            s_size = round(float(span.get("size", 0)), 1)
-                            if s_size > 0:
-                                size_counts[s_size] += len(span.get("text", ""))
-                                if is_span_bold(span) or (s_size >= base_body_font_size + 5.0):
-                                    qualifying_sizes.add(s_size)
+                            span_text = span.get("text", "").strip()
+                            span_size = round(float(span.get("size", 0)), 1)
+                            if span_text and span_size > 0:
+                                spans_found.append((span_text, span_size, span))
 
-    if not size_counts and not qualifying_sizes:
+    if not spans_found:
         return None
 
-    # If any spans forming this heading are bold or >= base + 5.0 pt, return the maximum qualifying size
-    if qualifying_sizes:
-        return max(qualifying_sizes)
+    # Check 1: Large font case (font size >= base + 5.0 pt)
+    large_sizes = [sz for _, sz, _ in spans_found if sz >= base_body_font_size + 5.0]
+    if large_sizes:
+        return max(large_sizes)
 
-    # If NO spans in this candidate text are bold or >= base + 5.0 pt, it is not a genuine heading!
+    # Check 2: Less than base + 5.0 pt -> MUST be bold throughout!
+    # Every text span in the candidate must be bold.
+    all_bold = all(is_span_bold(span) for _, _, span in spans_found)
+    if all_bold:
+        # Return maximum bold font size
+        return max(sz for _, sz, _ in spans_found)
+
+    # Not bold throughout and not >= base + 5.0 pt -> NOT a heading!
     return None
 
 
@@ -406,25 +405,9 @@ def is_heading_text_block(
         if dom_size is None:
             return False
 
-        # If it matches a known heading font size, or is >= base + 5.0 pt, or is bold and >= base body font size:
-        if dom_size in font_level_map:
-            return True
-        if dom_size >= base_body_font_size + 5.0:
-            return True
-
-        # Check if the block has bold text in PDF
-        clip_rect = fitz.Rect(bbox)
-        text_dict = pdf_page.get_text("dict", clip=clip_rect)
-        has_bold = False
-        for b in text_dict.get("blocks", []):
-            for l in b.get("lines", []):
-                for s in l.get("spans", []):
-                    if is_span_bold(s):
-                        has_bold = True
-                        break
-
-        if has_bold and dom_size >= base_body_font_size:
-            return True
+        # If it qualified by get_dominant_font_size_for_text, it is either >= base + 5.0 pt
+        # or bold throughout:
+        return True
     except Exception:
         pass
 
