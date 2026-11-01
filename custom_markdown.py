@@ -276,12 +276,19 @@ def is_span_bold(span: dict) -> bool:
     return (sflags & 16 != 0) or any(b in sfont for b in ("bold", "black", "heavy", "medium", "semibold"))
 
 
-def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_text: str) -> Optional[float]:
+def get_dominant_font_size_for_text(
+    page: fitz.Page,
+    bbox: List[float],
+    heading_text: str,
+    base_body_font_size: float = 10.0,
+) -> Optional[float]:
     """
     Scans the PDF page around bbox specifically for spans that contain the candidate heading text.
     - If the spans are bold, captures all bold font sizes and returns the maximum bold size
       (preventing small-caps letters, e.g. 8.04 pt, from dragging down a 9.96/10 pt heading).
-    - Otherwise returns the dominant font size.
+    - If any span is larger than the document's base body font size by at least 5 points
+      (span_size >= base_body_font_size + 5.0), it qualifies as a heading (e.g. large stylized/thin titles).
+    - Otherwise returns None (not a heading).
     """
     if not bbox or len(bbox) != 4:
         return None
@@ -304,7 +311,7 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
 
     text_dict = page.get_text("dict", clip=rect)
     size_counts = Counter()
-    bold_sizes = set()
+    qualifying_sizes = set()
 
     for block in text_dict.get("blocks", []):
         for line in block.get("lines", []):
@@ -319,8 +326,8 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
                 if matching_words or len(span_text) > 0:
                     match_len = sum(len(w) for w in matching_words) if matching_words else 1
                     size_counts[span_size] += match_len
-                    if is_span_bold(span):
-                        bold_sizes.add(span_size)
+                    if is_span_bold(span) or (span_size >= base_body_font_size + 5.0):
+                        qualifying_sizes.add(span_size)
 
     if not size_counts:
         # Fallback: search page for words in heading
@@ -336,18 +343,17 @@ def get_dominant_font_size_for_text(page: fitz.Page, bbox: List[float], heading_
                             s_size = round(float(span.get("size", 0)), 1)
                             if s_size > 0:
                                 size_counts[s_size] += len(span.get("text", ""))
-                                if is_span_bold(span):
-                                    bold_sizes.add(s_size)
+                                if is_span_bold(span) or (s_size >= base_body_font_size + 5.0):
+                                    qualifying_sizes.add(s_size)
 
-    if not size_counts and not bold_sizes:
+    if not size_counts and not qualifying_sizes:
         return None
 
-    # If any spans forming this heading are bold, use the maximum bold font size
-    # so small-caps lowercase equivalents do not downgrade the heading hierarchy level
-    if bold_sizes:
-        return max(bold_sizes)
+    # If any spans forming this heading are bold or >= base + 5.0 pt, return the maximum qualifying size
+    if qualifying_sizes:
+        return max(qualifying_sizes)
 
-    # If NO spans in this candidate text are bold, it is not a genuine heading!
+    # If NO spans in this candidate text are bold or >= base + 5.0 pt, it is not a genuine heading!
     return None
 
 
@@ -396,9 +402,15 @@ def is_heading_text_block(
         return False
 
     try:
-        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text)
+        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text, base_body_font_size=base_body_font_size)
         if dom_size is None:
             return False
+
+        # If it matches a known heading font size, or is >= base + 5.0 pt, or is bold and >= base body font size:
+        if dom_size in font_level_map:
+            return True
+        if dom_size >= base_body_font_size + 5.0:
+            return True
 
         # Check if the block has bold text in PDF
         clip_rect = fitz.Rect(bbox)
@@ -411,9 +423,6 @@ def is_heading_text_block(
                         has_bold = True
                         break
 
-        # If it matches a known heading font size, or is bold and larger than base body font size:
-        if dom_size in font_level_map:
-            return True
         if has_bold and dom_size >= base_body_font_size:
             return True
     except Exception:
@@ -472,7 +481,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
     """
     Step 1: Iterate through candidate heading blocks.
     - Filters out plain numbers and short noise (< 3 letters).
-    - Scans the PDF area for heading text and bold font sizes.
+    - Scans the PDF area for heading text and bold font sizes or font sizes >= base_body_font_size + 5.0.
     - Captures candidate font sizes without discarding based on body font size.
     - Sorts unique dominant font sizes descending: largest -> Level 1 (#), next -> Level 2 (##), etc.
     """
@@ -485,6 +494,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
         return {}
 
     try:
+        base_body_font_size = detect_base_body_font_size(doc)
         for page_elem in middle_json.pages:
             page_idx = page_elem.page_idx
             if page_idx < 0 or page_idx >= len(doc):
@@ -492,7 +502,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
 
             pdf_page = doc[page_idx]
             for block in page_elem.blocks:
-                if is_title_block(block) or (isinstance(block, TextBlock) and is_heading_text_block(block, pdf_page, candidate_sizes)):
+                if is_title_block(block) or (isinstance(block, TextBlock) and is_heading_text_block(block, pdf_page, candidate_sizes, base_body_font_size=base_body_font_size)):
                     raw_text = extract_raw_text(block)
                     if not is_valid_heading_candidate(raw_text):
                         # Skip plain numbers (e.g. 27, 35) or noise (< 3 letters)
@@ -500,7 +510,7 @@ def build_heading_font_map(middle_json: MiddleJson, pdf_path: str) -> Dict[float
 
                     bbox = getattr(block, "bbox", None)
                     if bbox:
-                        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text)
+                        dom_size = get_dominant_font_size_for_text(pdf_page, bbox, raw_text, base_body_font_size=base_body_font_size)
                         if dom_size is not None:
                             candidate_sizes.add(dom_size)
                 elif is_visual_block(block):
@@ -528,6 +538,7 @@ def _render_custom_title(
     font_level_map: Dict[float, int],
     pdf_doc: Optional[fitz.Document],
     page_idx: int,
+    base_body_font_size: float = 10.0,
     emitted_anchors: Optional[set] = None,
 ) -> str:
     """
@@ -548,9 +559,9 @@ def _render_custom_title(
     if pdf_doc and 0 <= page_idx < len(pdf_doc) and font_level_map:
         bbox = getattr(block, "bbox", None)
         if bbox:
-            dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text)
+            dom_size = get_dominant_font_size_for_text(pdf_doc[page_idx], bbox, raw_text, base_body_font_size=base_body_font_size)
             if dom_size is None:
-                # Text is NOT bold in the PDF -> Not a genuine heading! Render as normal text.
+                # Text is NOT bold and not >= base + 5.0 in the PDF -> Not a genuine heading! Render as normal text.
                 content_text = render_title_inline_content(block, delimiters)
                 return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
 
@@ -562,7 +573,7 @@ def _render_custom_title(
                 level = font_level_map[closest_size]
 
     if level is None:
-        # If we could not verify bold font size from PDF, do NOT guess or force a heading!
+        # If we could not verify heading font size from PDF, do NOT guess or force a heading!
         # Render as standard content text.
         content_text = render_title_inline_content(block, delimiters)
         return escape_standalone_marker_rule(escape_text_block_markdown_prefix(content_text))
@@ -602,8 +613,10 @@ def render_custom_markdown(
     font_level_map = build_heading_font_map(middle_json, pdf_path)
 
     pdf_doc = None
+    base_body_font_size = 10.0
     try:
         pdf_doc = fitz.open(pdf_path)
+        base_body_font_size = detect_base_body_font_size(pdf_doc)
     except Exception:
         pass
 
@@ -661,7 +674,7 @@ def render_custom_markdown(
                     isinstance(block, TextBlock)
                     and pdf_doc
                     and 0 <= planned.page_idx < len(pdf_doc)
-                    and is_heading_text_block(block, pdf_doc[planned.page_idx], font_level_map)
+                    and is_heading_text_block(block, pdf_doc[planned.page_idx], font_level_map, base_body_font_size=base_body_font_size)
                 )
 
                 if is_title_block(block) or is_inferred_heading:
@@ -671,6 +684,7 @@ def render_custom_markdown(
                         font_level_map,
                         pdf_doc,
                         planned.page_idx,
+                        base_body_font_size=base_body_font_size,
                         emitted_anchors=emitted_anchors,
                     )
                     if rendered:
