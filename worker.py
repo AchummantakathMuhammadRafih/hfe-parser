@@ -58,7 +58,7 @@ def run_conversion_task(task: dict):
 
     # Use parse_runner.py to execute local_parse directly with full unhandled stack traces
     base_stem = os.path.splitext(filename)[0]
-    zip_dest = os.path.join(output_dir, f"{base_stem}_parsed.zip")
+    zip_dest = os.path.join(output_dir, f"{base_stem}.zip")
     runner_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parse_runner.py")
 
     # Prefer virtual environment python if it exists in the project root

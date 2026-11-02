@@ -129,6 +129,18 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 ```
 *(Or use SSH tunneling from your local machine: `ssh -N -L 8501:localhost:8501 user@<vm-ip>` and browse to `http://localhost:8501`)*.
 
+### Docker / Container:
+```bash
+# Build the Docker image
+docker build -t hfe-parser .
+
+# Run container (mount ./data to persist uploads and parsed outputs)
+docker run -d -p 8501:8501 -v $(pwd)/data:/app/data --name hfe-parser hfe-parser
+
+# Or run with Docker Compose
+docker compose up -d
+```
+
 ---
 
 ## Configuration & Usage

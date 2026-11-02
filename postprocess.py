@@ -4,7 +4,7 @@ import zipfile
 from typing import List, Tuple, Optional
 
 # Match ATX headings: 1 to 6 '#' followed by whitespace and title text
-HEADING_REGEX = re.compile(r'^(#{1,6})\s+(.+)$')
+HEADING_REGEX = re.compile(r'^(#{1,})\s+(.+)$')
 
 def is_fenced_code_boundary(line: str) -> bool:
     stripped = line.strip()
@@ -93,90 +93,172 @@ def filter_document_noise_lines(content: str) -> Tuple[str, int]:
     result = re.sub(r'\n{3,}', '\n\n', result)
     return result, removed_count
 
+SECTION_PREFIX_REGEX = re.compile(r'^([0-9]+(?:\.[0-9]+)*|[A-Z](?:\.[0-9]+)+)')
+
+def get_heading_number_depth(title: str) -> Optional[int]:
+    """
+    Returns the numeric hierarchy depth if the heading has a section number:
+      '4 * Principles' -> 1
+      '4.1 General requirements' -> 2
+      '4.1.1 USABILITY PROCESS' -> 3
+      'A.1 Scope' -> 2
+    Returns None if unnumbered.
+    """
+    cleaned = re.sub(r'[*_`]+', '', title).strip()
+    m = SECTION_PREFIX_REGEX.match(cleaned)
+    if m:
+        parts = m.group(1).split('.')
+        return len(parts)
+    return None
+
 def clean_markdown_heading_hierarchy(content: str) -> Tuple[str, int]:
     """
-    Cleans consecutive markdown headings that have no body paragraph between them.
-
-    Rules:
-      - Case 1: L1 == L2 (e.g. ## H1 followed by ## H2 without text)
-        -> Merged as: ## H1 H2
-      - Case 2: L1 > L2 (e.g. ### H1 followed by ## H2 without text)
-        -> Merged as: ## H1 H2 (takes min(L1, L2), the higher hierarchy level)
-      - Case 3: L1 < L2 (e.g. ## H1 followed by ### H2 without text)
-        -> Kept as-is (valid parent-child hierarchy)
-      - Content inside code blocks (```) is never touched.
-
-    Returns:
-      (cleaned_content, merge_count)
+    Scans the document for consecutive headings without intervening body text.
+    Corrects inverted and equal-level consecutive headings in a foolproof manner:
+      1. Identifies consecutive heading clusters (no intervening text/code, only optional blanks).
+      2. If not in perfect hierarchy, finds the largest level (min hashes) and adjusts headers
+         step-by-step.
+      3. For the last heading in the cluster, finds its block scope (till next sibling/parent of same level).
+      4. Whatever delta (+ or -) the last heading experiences is strictly cascaded to all children
+         and nested children in that block.
+      5. Enforces sibling consistency: headings sharing the same section depth (e.g. 4.1.1 and 4.1.2)
+         under the same parent always match the same level.
+      6. Gracefully clamps any heading with level > 6 to bold markdown (**Title**).
     """
     lines = content.splitlines(keepends=True)
     if not lines:
         return content, 0
 
-    merged_count = 0
+    adjustment_count = 0
     in_code_block = False
 
-    # First pass: identify tokens (code_line, blank_line, heading, text_line)
-    # Each item: dict(type="heading"|"blank"|"text"|"code", line=..., level=..., text=...)
     tokens = []
     for line in lines:
         stripped = line.strip()
         if is_fenced_code_boundary(line):
             in_code_block = not in_code_block
-            tokens.append({"type": "code", "line": line})
+            tokens.append({'type': 'code', 'line': line})
             continue
 
         if in_code_block:
-            tokens.append({"type": "code", "line": line})
+            tokens.append({'type': 'code', 'line': line})
             continue
 
         if not stripped:
-            tokens.append({"type": "blank", "line": line})
+            tokens.append({'type': 'blank', 'line': line})
             continue
 
         m = HEADING_REGEX.match(stripped)
         if m:
-            level = len(m.group(1))
             title = m.group(2).strip()
-            tokens.append({"type": "heading", "level": level, "title": title, "line": line})
+            num_depth = get_heading_number_depth(title)
+            tokens.append({
+                'type': 'heading',
+                'level': len(m.group(1)),
+                'orig_level': len(m.group(1)),
+                'title': title,
+                'num_depth': num_depth,
+                'line': line
+            })
         else:
-            tokens.append({"type": "text", "line": line})
+            tokens.append({'type': 'text', 'line': line})
 
-    # Second pass: scan for consecutive headings
-    # If heading1 is followed only by blanks and then heading2:
-    #   if L1 >= L2: merge heading2 into heading1 with min(L1, L2)
-    i = 0
-    while i < len(tokens):
-        if tokens[i]["type"] == "heading":
-            # Look ahead past any blanks
-            j = i + 1
-            while j < len(tokens) and tokens[j]["type"] == "blank":
-                j += 1
+    h_indices = [idx for idx, t in enumerate(tokens) if t['type'] == 'heading']
+    if not h_indices:
+        return content, 0
 
-            if j < len(tokens) and tokens[j]["type"] == "heading":
-                l1 = tokens[i]["level"]
-                l2 = tokens[j]["level"]
+    # Group headings where there is NO intervening text or code (only blanks)
+    groups = []
+    curr_group = [0]
+    for k in range(1, len(h_indices)):
+        prev_idx = h_indices[k - 1]
+        this_idx = h_indices[k]
+        only_blanks = all(tokens[x]['type'] == 'blank' for x in range(prev_idx + 1, this_idx))
+        if only_blanks:
+            curr_group.append(k)
+        else:
+            groups.append(curr_group)
+            curr_group = [k]
+    groups.append(curr_group)
 
-                # Case 1 (L1 == L2) or Case 2 (L1 > L2)
-                if l1 >= l2:
-                    target_level = min(l1, l2)
-                    new_title = f"{tokens[i]['title']} {tokens[j]['title']}"
-                    hashes = "#" * target_level
-                    tokens[i]["level"] = target_level
-                    tokens[i]["title"] = new_title
-                    tokens[i]["line"] = f"{hashes} {new_title}\n"
+    # Process each consecutive group
+    for grp in groups:
+        if len(grp) <= 1:
+            continue
 
-                    # Remove intermediate blanks and heading2
-                    del tokens[i + 1 : j + 1]
-                    merged_count += 1
-                    # Do not advance i, in case a 3rd consecutive heading follows
-                    continue
+        levels = [tokens[h_indices[k]]['level'] for k in grp]
+        is_in_order = all(levels[i + 1] == levels[i] + 1 for i in range(len(levels) - 1))
 
-        i += 1
+        # STEP 3: Highest in group (minimum number of hashes)
+        highest_grp_level = min(levels)
 
-    # Reconstruct document
-    result = "".join(t["line"] for t in tokens)
-    return result, merged_count
+        # STEP 4: Block determination
+        # The block starts after the group and continues until the next heading
+        # that has the same or higher level as the group's highest (level <= highest_grp_level).
+        # Exception: If headings have numeric depth (e.g. 5.3 has depth 2, while 5.3.2 has depth 3),
+        # sub-headings deeper than the group's top heading belong INSIDE the block and do not terminate it!
+        last_k = grp[-1]
+        top_k = grp[0]
+        top_depth = tokens[h_indices[top_k]].get('num_depth')
+
+        block_end = len(h_indices)
+        for k in range(last_k + 1, len(h_indices)):
+            cand_token = tokens[h_indices[k]]
+            cand_depth = cand_token.get('num_depth')
+            if top_depth is not None and cand_depth is not None and cand_depth > top_depth:
+                # Still a deeper child inside the top heading's subtree (e.g., 5.3.2 under 5.3)
+                continue
+            if cand_token['level'] <= highest_grp_level:
+                block_end = k
+                break
+
+        # STEP 5: Last heading in group reference and original hashes
+        orig_last_level = tokens[h_indices[last_k]]['level']
+
+        # STEP 6: Normalization of group headers
+        # Top heading in group gets highest_grp_level, subsequent headings step down (+1 each)
+        if not is_in_order:
+            for pos in range(len(grp)):
+                t_idx = h_indices[grp[pos]]
+                target_lvl = highest_grp_level + pos
+                if tokens[t_idx]['level'] != target_lvl:
+                    tokens[t_idx]['level'] = target_lvl
+                    adjustment_count += 1
+
+        # Detect delta on the last header
+        new_last_level = tokens[h_indices[last_k]]['level']
+        delta_last = new_last_level - orig_last_level
+        last_depth = tokens[h_indices[last_k]].get('num_depth')
+
+        # STEP 7: Delta cascade across the entire block
+        # Cascades delta_last to all child/nested headings in the block.
+        # Also ensures sibling consistency: any heading in the block sharing the same depth
+        # as the last heading (e.g., 5.3.2 matching 5.3.1, or 4.1.2 matching 4.1.1)
+        # aligns to the last heading's level.
+        for k in range(last_k + 1, block_end):
+            t_idx = h_indices[k]
+            cand_depth = tokens[t_idx].get('num_depth')
+            if last_depth is not None and cand_depth is not None and cand_depth == last_depth:
+                # Sibling of last_k (e.g., 5.3.2 is sibling to 5.3.1; 4.1.2 is sibling to 4.1.1)
+                if tokens[t_idx]['level'] != new_last_level:
+                    tokens[t_idx]['level'] = new_last_level
+                    adjustment_count += 1
+            elif delta_last != 0:
+                tokens[t_idx]['level'] += delta_last
+                adjustment_count += 1
+
+    # Reconstruct lines and clamp level > 6 to bold markdown
+    for t in tokens:
+        if t['type'] == 'heading':
+            lvl = t['level']
+            if lvl > 6:
+                t['line'] = f"**{t['title']}**\n"
+            else:
+                t['line'] = ('#' * lvl) + ' ' + t['title'] + chr(10)
+
+    result = ''.join(t['line'] for t in tokens)
+    return result, adjustment_count
+
 
 
 # Regex patterns for markdown images and HTML images

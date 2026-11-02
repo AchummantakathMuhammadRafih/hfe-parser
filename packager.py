@@ -10,7 +10,7 @@ def create_result_zip(output_dir: str, task_id: int, base_filename: str) -> Opti
     if not os.path.exists(output_dir):
         return None
 
-    zip_filename = f"{os.path.splitext(base_filename)[0]}_parsed.zip"
+    zip_filename = f"{os.path.splitext(base_filename)[0]}.zip"
     zip_path = os.path.join(output_dir, zip_filename)
 
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
